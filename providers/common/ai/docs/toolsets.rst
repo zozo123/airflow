@@ -24,12 +24,14 @@ Airflow's 350+ provider hooks already have typed methods, rich docstrings,
 and managed credentials. Toolsets expose them as pydantic-ai tools so that
 LLM agents can call them during multi-turn reasoning.
 
-Three toolsets are included:
+Four toolsets are included:
 
 - :class:`~airflow.providers.common.ai.toolsets.hook.HookToolset` — generic
   adapter for any Airflow Hook.
 - :class:`~airflow.providers.common.ai.toolsets.sql.SQLToolset` — curated
   4-tool database toolset.
+- :class:`~airflow.providers.common.ai.toolsets.sandbox.SandboxToolset` — run
+  agent-generated Python in a genuinely isolated cloud sandbox (off the worker).
 - :class:`~airflow.providers.common.ai.toolsets.mcp.MCPToolset` — connect to
   `MCP servers <https://modelcontextprotocol.io/>`__ configured via Airflow
   connections.
@@ -728,3 +730,35 @@ Before deploying an agent task to production:
 8. **Prompt injection**: Be cautious when the prompt includes untrusted data
    (user input, external API responses, upstream XCom). Consider sanitizing
    inputs before passing them to the agent.
+
+
+``SandboxToolset``
+-----------------
+
+Exposes a single ``run_code`` tool that executes agent-generated Python in a
+genuinely isolated cloud sandbox via ``apache-airflow-providers-sandbox``
+(``local`` / Daytona / E2B / Modal / islo backends). Unlike ``code_mode``'s
+in-process Monty sandbox — whose tool calls still run on the Airflow worker —
+``SandboxToolset`` runs the code **off the worker**, in a microVM/container, so
+untrusted or model-generated code cannot touch the worker's filesystem,
+network, or credentials.
+
+Install the extra and pass it like any other toolset::
+
+    pip install "apache-airflow-providers-common-ai[sandbox]"
+
+.. code-block:: python
+
+    from airflow.providers.common.ai.operators.agent import AgentOperator
+    from airflow.providers.common.ai.toolsets import SandboxToolset
+
+    AgentOperator(
+        task_id="agent",
+        prompt="Compute something with code.",
+        llm_conn_id="openai_default",
+        toolsets=[SandboxToolset(provider="islo", image="python:3.12-slim")],
+    )
+
+Credentials for the backend (e.g. ``ISLO_API_KEY``) are resolved at run time,
+never at DAG-parse time. ``provider`` accepts a built-in alias
+(``local``/``daytona``/``e2b``/``modal``/``islo``) or a ``module:Class`` path.

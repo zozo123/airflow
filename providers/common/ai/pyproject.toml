@@ -85,6 +85,10 @@ dependencies = [
 # Enables AgentOperator(code_mode=True). Monty is pre-1.0; pinned here as an
 # opt-in extra so its churn never breaks the base provider install.
 "code-mode" = ["pydantic-ai-harness[codemode]>=0.3.0"]
+# Real-isolation sandbox for run_code (vs code-mode's in-worker Monty): the
+# SandboxToolset runs agent-generated Python in a Daytona/E2B/Modal/islo/local
+# sandbox via apache-airflow-providers-sandbox.
+"sandbox" = ["apache-airflow-providers-sandbox>=0.1.0"]
 # Agent Skills (agentskills.io) support. pydantic-ai-skills provides the toolset
 # (pulls in pydantic-ai-slim>=1.74 transitively; the provider base floor stays
 # 1.71); the git provider supplies GitHook + GitPython for cloning GitSkills with
