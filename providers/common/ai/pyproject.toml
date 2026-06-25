@@ -75,6 +75,13 @@ dependencies = [
 # The optional dependencies should be modified in place in the generated file
 # Any change in the dependencies is preserved when the file is regenerated
 [project.optional-dependencies]
+# Real-isolation sandbox backends for the SandboxToolset (run_code OFF the
+# worker). Local needs nothing; each SaaS backend is opt-in. islo (islo.dev)
+# is the maintained reference backend.
+"islo" = ["islo>=0.3.0"]
+"daytona" = ["daytona"]
+"e2b" = ["e2b"]
+"modal" = ["modal"]
 "anthropic" = ["pydantic-ai-slim[anthropic]"]
 "bedrock" = ["pydantic-ai-slim[bedrock]"]
 "google" = ["pydantic-ai-slim[google]"]

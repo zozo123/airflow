@@ -20,7 +20,13 @@ from __future__ import annotations
 
 from airflow.providers.common.ai.toolsets.hook import HookToolset
 
-__all__ = ["HookToolset", "MCPToolset", "SQLToolset", "airflow_toolset_to_langchain_tools"]
+__all__ = [
+    "HookToolset",
+    "MCPToolset",
+    "SQLToolset",
+    "SandboxToolset",
+    "airflow_toolset_to_langchain_tools",
+]
 
 
 def __getattr__(name: str):
@@ -46,4 +52,12 @@ def __getattr__(name: str):
 
             raise AirflowOptionalProviderFeatureException(e)
         return MCPToolset
+    if name == "SandboxToolset":
+        try:
+            from airflow.providers.common.ai.toolsets.sandbox import SandboxToolset
+        except ImportError as e:
+            from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
+
+            raise AirflowOptionalProviderFeatureException(e)
+        return SandboxToolset
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

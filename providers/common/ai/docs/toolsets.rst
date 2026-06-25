@@ -728,3 +728,27 @@ Before deploying an agent task to production:
 8. **Prompt injection**: Be cautious when the prompt includes untrusted data
    (user input, external API responses, upstream XCom). Consider sanitizing
    inputs before passing them to the agent.
+
+
+``SandboxToolset``
+-----------------
+
+Exposes a single ``run_code`` tool that executes agent-generated Python in a
+genuinely isolated cloud sandbox, OFF the Airflow worker (local / islo /
+Daytona / E2B / Modal backends). Unlike ``code_mode``'s in-process Monty
+sandbox — whose tool calls still run on the worker — this runs the code in a
+microVM/container, so untrusted or model-generated code cannot touch the
+worker's filesystem, network, or credentials.
+
+    pip install "apache-airflow-providers-common-ai[islo]"
+
+.. code-block:: python
+
+    from airflow.providers.common.ai.operators.agent import AgentOperator
+    from airflow.providers.common.ai.toolsets import SandboxToolset
+
+    AgentOperator(
+        task_id="agent", prompt="Compute something with code.",
+        llm_conn_id="openai_default",
+        toolsets=[SandboxToolset(provider="islo", image="python:3.12-slim")],
+    )
