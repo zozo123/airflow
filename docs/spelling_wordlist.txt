@@ -318,6 +318,7 @@ contrib
 convertToIri
 cooldown
 copyable
+coreutils
 CoreV
 coroutine
 cosmosdb
@@ -876,6 +877,7 @@ irreproducible
 IRSA
 isfile
 ish
+islo
 isn
 isort
 istio
@@ -1066,6 +1068,7 @@ mgmt
 microservice
 microservices
 microsoft
+microVM
 middleware
 middlewares
 midnights
@@ -1472,6 +1475,7 @@ sanitization
 sas
 Sasl
 sasl
+sbx
 scala
 scalability
 scalable
@@ -1743,6 +1747,7 @@ tis
 TLS
 tls
 tmp
+tmpfs
 tnsnames
 todo
 tokenization

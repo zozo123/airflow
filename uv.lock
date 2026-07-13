@@ -4437,6 +4437,9 @@ parquet = [
 pdf = [
     { name = "pypdf" },
 ]
+sandbox-islo = [
+    { name = "islo" },
+]
 skills = [
     { name = "apache-airflow-providers-git" },
     { name = "pydantic-ai-skills" },
@@ -4455,6 +4458,7 @@ dev = [
     { name = "apache-airflow-providers-git" },
     { name = "apache-airflow-providers-standard" },
     { name = "apache-airflow-task-sdk" },
+    { name = "islo" },
     { name = "langchain" },
     { name = "llama-index-core" },
     { name = "llama-index-embeddings-openai" },
@@ -4479,6 +4483,7 @@ requires-dist = [
     { name = "dataclasses-json", marker = "extra == 'llamaindex'", specifier = ">=0.6.7" },
     { name = "fastavro", marker = "python_full_version >= '3.14' and extra == 'avro'", specifier = ">=1.12.1" },
     { name = "fastavro", marker = "python_full_version < '3.14' and extra == 'avro'", specifier = ">=1.10.0" },
+    { name = "islo", marker = "extra == 'sandbox-islo'", specifier = ">=0.3.9" },
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=1.0.0" },
     { name = "llama-index-core", marker = "extra == 'llamaindex'", specifier = ">=0.13.0" },
     { name = "llama-index-embeddings-openai", marker = "extra == 'llamaindex'", specifier = ">=0.6.0" },
@@ -4497,7 +4502,7 @@ requires-dist = [
     { name = "python-docx", marker = "extra == 'docx'", specifier = ">=1.0.0" },
     { name = "sqlglot", marker = "extra == 'sql'", specifier = ">=30.0.0" },
 ]
-provides-extras = ["anthropic", "bedrock", "google", "openai", "mcp", "code-mode", "skills", "avro", "parquet", "sql", "common-sql", "langchain", "llamaindex", "pdf", "docx", "git"]
+provides-extras = ["anthropic", "bedrock", "google", "openai", "mcp", "code-mode", "skills", "sandbox-islo", "avro", "parquet", "sql", "common-sql", "langchain", "llamaindex", "pdf", "docx", "git"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4509,6 +4514,7 @@ dev = [
     { name = "apache-airflow-providers-git", editable = "providers/git" },
     { name = "apache-airflow-providers-standard", editable = "providers/standard" },
     { name = "apache-airflow-task-sdk", editable = "task-sdk" },
+    { name = "islo", specifier = ">=0.3.9" },
     { name = "langchain", specifier = ">=1.0.0" },
     { name = "llama-index-core", specifier = ">=0.13.0" },
     { name = "llama-index-embeddings-openai", specifier = ">=0.6.0" },
@@ -14698,6 +14704,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ef/4c/5dd1d8af08107f88c7f741ead7a40854b8ac24ddf9ae850afbcf698aa552/ipython_pygments_lexers-1.1.1.tar.gz", hash = "sha256:09c0138009e56b6854f9535736f4171d855c8c08a563a0dcd8022f78355c7e81", size = 8393, upload-time = "2025-01-17T11:24:34.505Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d9/33/1f075bf72b0b747cb3288d011319aaf64083cf2efef8354174e3ed4540e2/ipython_pygments_lexers-1.1.1-py3-none-any.whl", hash = "sha256:a9462224a505ade19a605f71f8fa63c2048833ce50abc86768a0d81d876dc81c", size = 8074, upload-time = "2025-01-17T11:24:33.271Z" },
+]
+
+[[package]]
+name = "islo"
+version = "0.3.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/02/9521cf02dfaeb30b849e469601a9a51689a8fec35402d142814510907aa5/islo-0.3.9.tar.gz", hash = "sha256:ea37e1618a2c4bb0aa9b0a3add1a3fe5309f7ed536377e130c15e02fb94f4a66", size = 99925, upload-time = "2026-07-07T12:19:57.655Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/20/21cc2b3fe2a4d60f21ff590fd7485c122cd0f64d10595ac509670eef49a5/islo-0.3.9-py3-none-any.whl", hash = "sha256:614c3297b36e1e82c83d472cb1a5dea564920c3daa5900f35ab05ff7827ab47a", size = 218099, upload-time = "2026-07-07T12:19:56.244Z" },
 ]
 
 [[package]]
