@@ -77,7 +77,7 @@ class SandboxToolset(AbstractToolset[Any]):
     failure) propagate and fail the task.
 
     :param backend: Sandbox backend that provisions and runs the sandbox, e.g.
-        :class:`~airflow.providers.common.ai.sandbox.DockerSandboxBackend` or
+        :class:`~airflow.providers.common.ai.sandbox.SbxSandboxBackend` or
         :class:`~airflow.providers.common.ai.sandbox.IsloSandboxBackend`.
     :param timeout: Timeout in seconds for a single ``run_code`` call.
         Default ``300``.

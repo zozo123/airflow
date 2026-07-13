@@ -22,29 +22,23 @@ import math
 import shutil
 import subprocess
 import tempfile
-import time
+from contextlib import suppress
 
 from airflow.providers.common.ai.sandbox.base import (
     SandboxBackend,
     SandboxResult,
+    _cap_output,
     _new_sandbox_name,
     _validate_positive_finite,
 )
 from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
 
-# Cap on each of stdout/stderr returned from a command, protecting the LLM
-# context window from unbounded output.
-_MAX_OUTPUT_CHARS = 64 * 1024
 # Extra wall-clock beyond the per-command budget to absorb CLI + microVM
 # round-trip overhead before we treat the sbx call itself as hung.
 _EXEC_GRACE = 30.0
-
-
-def _cap(text: str) -> tuple[str, bool]:
-    """Return ``text`` capped at ``_MAX_OUTPUT_CHARS`` and whether it was cut."""
-    if len(text) <= _MAX_OUTPUT_CHARS:
-        return text, False
-    return text[:_MAX_OUTPUT_CHARS], True
+# Grace after the timeout fires before the command is force-killed (SIGKILL) if
+# it ignored SIGTERM. Kept well under _EXEC_GRACE so the outer call still returns.
+_KILL_AFTER = 10
 
 
 class SbxSandboxBackend(SandboxBackend):
@@ -65,7 +59,10 @@ class SbxSandboxBackend(SandboxBackend):
     ``python:*-slim``, does).
 
     Airflow injects none of its context, connections, or worker environment into
-    the sandbox; a custom template image may still bundle its own tools.
+    the sandbox; a custom template image may still bundle its own tools. Outbound
+    network egress is governed by the host ``sbx policy`` (a Deployment Manager
+    setting), not by this backend — run ``sbx policy init deny-all`` for a
+    no-egress default.
 
     :param image: Container image for the sandbox (``sbx --template``).
         Default ``"python:3.12-slim"``.
@@ -124,15 +121,23 @@ class SbxSandboxBackend(SandboxBackend):
                 "(https://docs.docker.com/ai/sandboxes/) and run 'sbx policy init' once."
             )
         name = _new_sandbox_name()
-        workspace = tempfile.mkdtemp(prefix="airflow-sbx-ws-")
+        workspace = tempfile.mkdtemp(prefix="airflow-sandbox-ws-")
         args = ["create", "--name", name, "--memory", self._memory, "--template", self._image]
         if self._cpus is not None:
             args += ["--cpus", str(int(self._cpus))]
         args += ["shell", workspace]
-        result = self._run_cli(args, timeout=self._create_timeout)
-        if result.returncode != 0:
+        try:
+            result = self._run_cli(args, timeout=self._create_timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"'sbx create' failed ({result.returncode}): {result.stderr.strip()}")
+        except BaseException:
+            # A timeout, a nonzero exit, or a partial provision all leave a
+            # possibly-orphaned microVM and a workspace tempdir. Best-effort
+            # clean both so nothing leaks on the host or in sbx.
+            with suppress(Exception):
+                self._run_cli(["rm", "-f", name], timeout=120.0)
             shutil.rmtree(workspace, ignore_errors=True)
-            raise RuntimeError(f"'sbx create' failed ({result.returncode}): {result.stderr.strip()}")
+            raise
         self._workspaces[name] = workspace
         return name
 
@@ -141,8 +146,19 @@ class SbxSandboxBackend(SandboxBackend):
         # Round up: GNU timeout treats 0 as "no timeout", so a sub-second value
         # must not truncate to it.
         seconds = max(1, math.ceil(timeout))
-        exec_args = ["exec", sandbox, "timeout", "--signal=KILL", str(seconds), *command]
-        started = time.monotonic()
+        # Default (SIGTERM) timeout with a SIGKILL fallback: GNU ``timeout`` exits
+        # exactly 124 when the budget is hit, and passes the command's own exit
+        # code through otherwise. So exit 124 is an unambiguous timeout, while an
+        # OOM-kill or a crash surfaces as its real nonzero code (137, …) rather
+        # than being mislabelled a timeout — no wall-clock guessing needed.
+        exec_args = [
+            "exec",
+            sandbox,
+            "timeout",
+            f"--kill-after={_KILL_AFTER}",
+            str(seconds),
+            *command,
+        ]
         try:
             result = self._run_cli(exec_args, timeout=timeout + _EXEC_GRACE)
         except subprocess.TimeoutExpired:
@@ -157,19 +173,13 @@ class SbxSandboxBackend(SandboxBackend):
                 timed_out=True,
                 sandbox_terminated=True,
             )
-        elapsed = time.monotonic() - started
-        stdout, stdout_truncated = _cap(result.stdout)
-        stderr, stderr_truncated = _cap(result.stderr)
+        stdout, stdout_truncated = _cap_output(result.stdout)
+        stderr, stderr_truncated = _cap_output(result.stderr)
         return SandboxResult(
             exit_code=result.returncode,
             stdout=stdout,
             stderr=stderr,
-            # ``timeout --signal=KILL`` exits 137 (128+9) when it kills the
-            # command at ``seconds``; a fast OOM-kill or a self-chosen 124/137
-            # exit produces the same codes, so only call it a timeout when the
-            # command actually ran the full budget (see DockerSandboxBackend's
-            # retired counterpart for the reasoning that shaped this).
-            timed_out=result.returncode in (124, 137) and elapsed >= seconds,
+            timed_out=result.returncode == 124,
             truncated=stdout_truncated or stderr_truncated,
         )
 

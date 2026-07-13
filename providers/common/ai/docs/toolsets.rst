@@ -510,7 +510,9 @@ ends.
 It is a Deployment Manager prerequisite to install the ``sbx`` binary
 (``brew install docker/tap/sbx`` / ``winget install Docker.sbx``) and run
 ``sbx policy init`` once on the worker host; the backend needs no Python
-dependency. The template image must provide the GNU ``timeout`` utility, which
+dependency. Outbound network egress is governed by that host ``sbx policy``
+rather than by the backend — use ``sbx policy init deny-all`` for a no-egress
+default. The template image must provide the GNU ``timeout`` utility, which
 enforces the per-command timeout (any Debian/Ubuntu-based image, including
 ``python:*-slim``, does).
 

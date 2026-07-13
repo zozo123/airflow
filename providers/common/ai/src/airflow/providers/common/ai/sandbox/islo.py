@@ -23,18 +23,16 @@ import time
 from contextlib import suppress
 from typing import Any
 
-try:
-    from islo import Islo
-    from islo.errors import NotFoundError
-    from islo.types import LifecyclePolicy
-except ImportError as e:
-    from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
-
-    raise AirflowOptionalProviderFeatureException(e)
+# The missing-``islo`` case is turned into AirflowOptionalProviderFeatureException
+# by the package __init__'s lazy import, so import the SDK plainly here.
+from islo import Islo
+from islo.errors import NotFoundError
+from islo.types import LifecyclePolicy
 
 from airflow.providers.common.ai.sandbox.base import (
     SandboxBackend,
     SandboxResult,
+    _cap_output,
     _new_sandbox_name,
     _validate_positive_finite,
 )
@@ -150,19 +148,24 @@ class IsloSandboxBackend(SandboxBackend):
         while time.monotonic() < deadline:
             result = client.sandboxes.get_exec_result(sandbox, response.exec_id)
             if result.status in _TERMINAL_EXEC_STATUSES:
+                stdout, stdout_truncated = _cap_output(result.stdout or "")
+                stderr, stderr_truncated = _cap_output(result.stderr or "")
                 return SandboxResult(
                     exit_code=result.exit_code if result.exit_code is not None else -1,
-                    stdout=result.stdout or "",
-                    stderr=result.stderr or "",
+                    stdout=stdout,
+                    stderr=stderr,
                     timed_out=result.status == "timeout",
-                    truncated=result.truncated,
+                    truncated=result.truncated or stdout_truncated or stderr_truncated,
                 )
             time.sleep(_EXEC_POLL_INTERVAL)
 
         # The API did not report a terminal result after its server-side
         # timeout. Delete the microVM so the command cannot continue in the
-        # shared sandbox, then tell the toolset to provision a fresh one.
-        self.destroy(sandbox)
+        # shared sandbox, then tell the toolset to provision a fresh one. A
+        # transient delete failure must not fail the task — the server-side TTL
+        # (delete_after) is the backstop — so this teardown is best-effort.
+        with suppress(Exception):
+            self.destroy(sandbox)
         return SandboxResult(
             exit_code=-1,
             stdout="",
