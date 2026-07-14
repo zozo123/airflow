@@ -22,12 +22,13 @@ import math
 import shutil
 import subprocess
 import tempfile
+import threading
 from contextlib import suppress
 
 from airflow.providers.common.ai.sandbox.base import (
+    _MAX_OUTPUT_CHARS,
     SandboxBackend,
     SandboxResult,
-    _cap_output,
     _new_sandbox_name,
     _validate_positive_finite,
 )
@@ -106,12 +107,61 @@ class SbxSandboxBackend(SandboxBackend):
         self._workspaces: dict[str, str] = {}
 
     def _run_cli(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        # Only for small, bounded output (create/rm). Command execution uses
+        # _exec_capped, which bounds memory against unbounded agent output.
         return subprocess.run(
             [self._sbx_path, *args],
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+        )
+
+    def _exec_capped(self, args: list[str], *, timeout: float) -> tuple[int, str, str, bool]:
+        """
+        Run the CLI with the output retained bounded to ``_MAX_OUTPUT_CHARS`` per stream.
+
+        Agent code can print unbounded output; ``subprocess.run`` would buffer
+        all of it and OOM the worker, so drain incrementally and keep only the
+        cap. Returns ``(returncode, stdout, stderr, truncated)``.
+        """
+        proc = subprocess.Popen(
+            [self._sbx_path, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def drain(stream, buf: bytearray, flag: list[bool]) -> None:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                room = _MAX_OUTPUT_CHARS - len(buf)
+                if room > 0:
+                    buf.extend(chunk[:room])
+                if len(chunk) > room:
+                    flag[0] = True
+
+        out, err = bytearray(), bytearray()
+        out_trunc, err_trunc = [False], [False]
+        threads = [
+            threading.Thread(target=drain, args=(proc.stdout, out, out_trunc)),
+            threading.Thread(target=drain, args=(proc.stderr, err, err_trunc)),
+        ]
+        for t in threads:
+            t.start()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            for t in threads:
+                t.join()
+            raise
+        for t in threads:
+            t.join()
+        return (
+            proc.returncode,
+            out.decode(errors="replace"),
+            err.decode(errors="replace"),
+            out_trunc[0] or err_trunc[0],
         )
 
     def create(self) -> str:
@@ -160,7 +210,9 @@ class SbxSandboxBackend(SandboxBackend):
             *command,
         ]
         try:
-            result = self._run_cli(exec_args, timeout=timeout + _EXEC_GRACE)
+            returncode, stdout, stderr, truncated = self._exec_capped(
+                exec_args, timeout=timeout + _EXEC_GRACE
+            )
         except subprocess.TimeoutExpired:
             # The CLI never returned: the command may still be running in the
             # shared microVM. Destroy it so it cannot continue, and tell the
@@ -173,14 +225,12 @@ class SbxSandboxBackend(SandboxBackend):
                 timed_out=True,
                 sandbox_terminated=True,
             )
-        stdout, stdout_truncated = _cap_output(result.stdout)
-        stderr, stderr_truncated = _cap_output(result.stderr)
         return SandboxResult(
-            exit_code=result.returncode,
+            exit_code=returncode,
             stdout=stdout,
             stderr=stderr,
-            timed_out=result.returncode == 124,
-            truncated=stdout_truncated or stderr_truncated,
+            timed_out=returncode == 124,
+            truncated=truncated,
         )
 
     def destroy(self, sandbox: str) -> None:

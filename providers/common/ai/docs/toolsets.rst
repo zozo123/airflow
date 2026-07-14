@@ -578,10 +578,10 @@ Constructor parameters:
   deleted even if the worker never got to destroy it (killed mid-run).
   Default ``3600``.
 
-The command timeout is also sent to Islo for server-side enforcement. If the
-API does not report a terminal command state within a short grace period, the
-backend deletes the microVM before returning the timeout and marks the sandbox
-as terminated.
+The command timeout is enforced by the backend, not the islo API (the API's
+``timeout_secs`` is only a compatibility hint). If no terminal command state
+arrives within the timeout plus a short grace period, the backend deletes the
+microVM, marks the sandbox terminated, and returns a timeout.
 
 Parameters
 ^^^^^^^^^^

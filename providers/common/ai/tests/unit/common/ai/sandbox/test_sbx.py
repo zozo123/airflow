@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -121,45 +122,50 @@ class TestSbxSandboxBackendCreate:
 
 
 class TestSbxSandboxBackendRun:
-    @patch(f"{_MOD}.subprocess.run", return_value=_completed(0, stdout="42\n"))
-    def test_run_wraps_in_timeout_and_maps_output(self, run):
-        result = SbxSandboxBackend().run("sbx-1", ["python3", "-c", "print(42)"], timeout=10.0)
+    def test_run_wraps_in_timeout_and_maps_output(self):
+        backend = SbxSandboxBackend()
+        with patch.object(backend, "_exec_capped", return_value=(0, "42\n", "", False)) as ec:
+            result = backend.run("sbx-1", ["python3", "-c", "print(42)"], timeout=10.0)
 
-        args = run.call_args.args[0]
+        args = ec.call_args.args[0]
         assert args == [
-            "sbx", "exec", "sbx-1", "timeout", "--kill-after=10", "10", "python3", "-c", "print(42)",
+            "exec", "sbx-1", "timeout", "--kill-after=10", "10", "python3", "-c", "print(42)",
         ]  # fmt: skip
-        assert run.call_args.kwargs["timeout"] == pytest.approx(40.0)  # 10 + _EXEC_GRACE
+        assert ec.call_args.kwargs["timeout"] == pytest.approx(40.0)  # 10 + _EXEC_GRACE
         assert result.exit_code == 0
         assert result.stdout == "42\n"
         assert result.timed_out is False
         assert result.truncated is False
 
-    @patch(f"{_MOD}.subprocess.run", return_value=_completed(124))
-    def test_run_exit_124_is_timeout(self, run):
+    def test_run_exit_124_is_timeout(self):
         # GNU timeout exits exactly 124 when the budget is hit.
-        result = SbxSandboxBackend().run("sbx-1", ["sleep", "60"], timeout=10.0)
+        backend = SbxSandboxBackend()
+        with patch.object(backend, "_exec_capped", return_value=(124, "", "", False)):
+            result = backend.run("sbx-1", ["sleep", "60"], timeout=10.0)
         assert result.timed_out is True
 
     @pytest.mark.parametrize("exit_code", [0, 1, 137])
-    @patch(f"{_MOD}.subprocess.run")
-    def test_run_non_124_is_not_timeout(self, run, exit_code):
+    def test_run_non_124_is_not_timeout(self, exit_code):
         # 137 = OOM-kill / SIGKILL escalation / self-exit — a failure, not a timeout.
-        run.return_value = _completed(exit_code, stderr="x")
-        result = SbxSandboxBackend().run("sbx-1", ["python3", "-c", "..."], timeout=10.0)
+        backend = SbxSandboxBackend()
+        with patch.object(backend, "_exec_capped", return_value=(exit_code, "", "x", False)):
+            result = backend.run("sbx-1", ["python3", "-c", "..."], timeout=10.0)
         assert result.timed_out is False
         assert result.exit_code == exit_code
 
-    @patch(f"{_MOD}.subprocess.run")
-    def test_run_caps_output_and_flags_truncation(self, run):
-        run.return_value = _completed(0, stdout="x" * (_MAX_OUTPUT_CHARS + 100))
-        result = SbxSandboxBackend().run("sbx-1", ["yes"], timeout=10.0)
-        assert len(result.stdout) == _MAX_OUTPUT_CHARS
+    def test_run_propagates_truncation_flag(self):
+        backend = SbxSandboxBackend()
+        with patch.object(backend, "_exec_capped", return_value=(0, "x", "", True)):
+            result = backend.run("sbx-1", ["yes"], timeout=10.0)
         assert result.truncated is True
 
-    @patch(f"{_MOD}.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="sbx", timeout=40))
-    def test_run_cli_hang_destroys_and_replaces(self, run):
-        result = SbxSandboxBackend().run("sbx-1", ["sleep", "999"], timeout=10.0)
+    def test_run_cli_hang_destroys_and_replaces(self):
+        backend = SbxSandboxBackend()
+        with (
+            patch.object(backend, "_exec_capped", side_effect=subprocess.TimeoutExpired("sbx", 40)),
+            patch(f"{_MOD}.subprocess.run", return_value=_completed(0)) as run,
+        ):
+            result = backend.run("sbx-1", ["sleep", "999"], timeout=10.0)
 
         assert result.timed_out is True
         assert result.sandbox_terminated is True
@@ -169,6 +175,32 @@ class TestSbxSandboxBackendRun:
     def test_run_rejects_invalid_timeout(self, timeout):
         with pytest.raises(ValueError, match="timeout"):
             SbxSandboxBackend().run("sbx-1", ["true"], timeout=timeout)
+
+
+class TestSbxSandboxBackendExecCapped:
+    """Exercises the real Popen + capped-drain path (no sbx needed: run Python directly)."""
+
+    def test_bounds_stdout_and_stderr_and_flags_truncation(self):
+        backend = SbxSandboxBackend(sbx_path=sys.executable)
+        code = "import sys; sys.stdout.write('x'*200000); sys.stderr.write('y'*200000)"
+        rc, out, err, truncated = backend._exec_capped(["-c", code], timeout=30.0)
+
+        assert rc == 0
+        assert len(out) == _MAX_OUTPUT_CHARS
+        assert len(err) == _MAX_OUTPUT_CHARS
+        assert truncated is True
+
+    def test_small_output_is_untruncated(self):
+        backend = SbxSandboxBackend(sbx_path=sys.executable)
+        rc, out, err, truncated = backend._exec_capped(["-c", "print('hi')"], timeout=30.0)
+        assert rc == 0
+        assert out.strip() == "hi"
+        assert truncated is False
+
+    def test_raises_on_timeout(self):
+        backend = SbxSandboxBackend(sbx_path=sys.executable)
+        with pytest.raises(subprocess.TimeoutExpired):
+            backend._exec_capped(["-c", "import time; time.sleep(30)"], timeout=1.0)
 
 
 class TestSbxSandboxBackendDestroy:

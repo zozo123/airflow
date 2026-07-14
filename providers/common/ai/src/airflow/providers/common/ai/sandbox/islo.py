@@ -139,6 +139,9 @@ class IsloSandboxBackend(SandboxBackend):
     def run(self, sandbox: str, command: list[str], *, timeout: float) -> SandboxResult:
         _validate_positive_finite(timeout, "timeout")
         client = self._get_client()
+        # ``timeout_secs`` is only a client-side hint to the islo API (not
+        # server-enforced), so the real bound is our poll deadline below: if no
+        # terminal result arrives in time we delete the microVM ourselves.
         response = client.sandboxes.exec_in_sandbox(
             sandbox,
             command=list(command),
@@ -159,9 +162,9 @@ class IsloSandboxBackend(SandboxBackend):
                 )
             time.sleep(_EXEC_POLL_INTERVAL)
 
-        # The API did not report a terminal result after its server-side
-        # timeout. Delete the microVM so the command cannot continue in the
-        # shared sandbox, then tell the toolset to provision a fresh one. A
+        # No terminal result within our poll deadline. Delete the microVM so the
+        # command cannot continue in the shared sandbox, then tell the toolset
+        # to provision a fresh one. A
         # transient delete failure must not fail the task — the server-side TTL
         # (delete_after) is the backstop — so this teardown is best-effort.
         with suppress(Exception):
