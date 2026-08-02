@@ -26,6 +26,14 @@ from airflow.exceptions import AirflowException
 from airflow.providers.common.sandbox.models import SandboxHandle
 from airflow.providers.docker.sandbox.operators import DockerSandboxJobOperator
 
+_REQUEST_ID = "234e4567-e89b-12d3-a456-426614174000"
+_HANDLE_DATA = {
+    "request_id": _REQUEST_ID,
+    "sandbox_name": f"airflow-{_REQUEST_ID}",
+    "sandbox_id": "sandbox-id",
+    "schema_version": 1,
+}
+
 
 @pytest.fixture
 def operator(tmp_path):
@@ -37,24 +45,13 @@ def operator(tmp_path):
     )
 
 
-@pytest.fixture
-def handle():
-    return SandboxHandle(
-        data={
-            "request_id": "234e4567-e89b-12d3-a456-426614174000",
-            "sandbox_name": "airflow-234e4567-e89b-12d3-a456-426614174000",
-            "sandbox_id": "sandbox-id",
-            "schema_version": 1,
-        },
-        display_name="airflow-234e4567-e89b-12d3-a456-426614174000",
-    )
-
-
-def event_for(handle, **values):
+def _event(state: str, *, exit_code: int | None = None, message: str | None = None):
     return {
-        "handle_data": handle.data,
-        "display_name": handle.display_name,
-        **values,
+        "state": state,
+        "exit_code": exit_code,
+        "message": message,
+        "handle_data": _HANDLE_DATA,
+        "display_name": f"airflow-{_REQUEST_ID}",
     }
 
 
@@ -68,59 +65,65 @@ def test_request_id_is_stable_for_one_task_attempt(operator):
             try_number=1,
         )
     }
+
     assert operator._request_id(context) == operator._request_id(context)
 
 
-def test_execute_defers_with_serialized_handle(operator, handle):
+def test_execute_defers_with_persisted_handle(operator):
+    handle = SandboxHandle(data=_HANDLE_DATA, display_name=f"airflow-{_REQUEST_ID}")
     driver = mock.Mock()
     driver.launch = mock.AsyncMock(return_value=handle)
     driver.close = mock.AsyncMock()
     operator._driver = mock.Mock(return_value=driver)
-    operator._request_id = mock.Mock(return_value="234e4567-e89b-12d3-a456-426614174000")
+    operator._request_id = mock.Mock(return_value=_REQUEST_ID)
     operator.defer = mock.Mock(side_effect=RuntimeError("deferred"))
 
     with pytest.raises(RuntimeError, match="deferred"):
         operator.execute({"ti": mock.Mock()})
 
+    assert operator._handle == handle
     trigger = operator.defer.call_args.kwargs["trigger"]
-    assert trigger.handle_data == handle.data
-    assert trigger.display_name == handle.display_name
+    assert trigger.handle_data == _HANDLE_DATA
+    assert trigger.keep is False
 
 
-def test_execute_complete_reconstructs_handle_after_restart(operator, handle):
+def test_execute_complete_recovers_handle_from_event(operator):
     operator._handle = None
-    operator._terminate = mock.Mock()
+    operator._terminate_current_handle = mock.Mock()
 
-    result = operator.execute_complete(
-        {},
-        event_for(handle, state="succeeded", exit_code=0, message=None),
-    )
+    result = operator.execute_complete({}, _event("succeeded", exit_code=0))
 
-    assert result["state"] == "succeeded"
-    operator._terminate.assert_called_once_with(handle)
+    assert result == {"state": "succeeded", "exit_code": 0, "message": None}
+    assert operator._handle == SandboxHandle(data=_HANDLE_DATA, display_name=f"airflow-{_REQUEST_ID}")
+    operator._terminate_current_handle.assert_called_once_with()
 
 
-def test_execute_complete_raises_on_failure_and_terminates(operator, handle):
-    operator._terminate = mock.Mock()
-
-    with pytest.raises(AirflowException, match="exit code 17"):
-        operator.execute_complete(
-            {},
-            event_for(handle, state="failed", exit_code=17, message="boom"),
-        )
-
-    operator._terminate.assert_called_once_with(handle)
-
-
-def test_execute_complete_rejects_missing_handle(operator):
-    with pytest.raises(AirflowException, match="no durable handle"):
+def test_execute_complete_rejects_event_without_handle(operator):
+    with pytest.raises(AirflowException, match="persisted handle"):
         operator.execute_complete({}, {"state": "succeeded"})
 
 
-def test_on_kill_terminates_current_job(operator, handle):
-    operator._handle = handle
-    operator._terminate = mock.Mock()
+def test_execute_complete_raises_on_failure_and_terminates(operator):
+    operator._terminate_current_handle = mock.Mock()
+
+    with pytest.raises(AirflowException, match="exit code 17"):
+        operator.execute_complete({}, _event("failed", exit_code=17, message="boom"))
+
+    operator._terminate_current_handle.assert_called_once_with()
+
+
+def test_keep_skips_completion_cleanup(operator):
+    operator.keep = True
+    operator._terminate_current_handle = mock.Mock()
+
+    operator.execute_complete({}, _event("succeeded", exit_code=0))
+
+    operator._terminate_current_handle.assert_not_called()
+
+
+def test_on_kill_terminates_current_job(operator):
+    operator._terminate_current_handle = mock.Mock()
 
     operator.on_kill()
 
-    operator._terminate.assert_called_once_with(handle)
+    operator._terminate_current_handle.assert_called_once_with()
