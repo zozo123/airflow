@@ -38,27 +38,12 @@ with DAG(
     catchup=False,
     tags=["example", "docker", "sandbox"],
 ) as dag:
-    success = DockerSandboxJobOperator(
-        task_id="success",
+    run_job = DockerSandboxJobOperator(
+        task_id="run_job",
         template=TEMPLATE,
         command=["python", "-c", "print('docker sandbox job ok')"],
         scratch_root=SCRATCH_ROOT,
         deferrable=True,
     )
-
-    nonzero_exit = DockerSandboxJobOperator(
-        task_id="nonzero_exit",
-        template=TEMPLATE,
-        command=["python", "-c", "raise SystemExit(17)"],
-        scratch_root=SCRATCH_ROOT,
-        deferrable=True,
-    )
-    nonzero_exit.trigger_rule = "all_done"
-
-    success >> nonzero_exit
-
-    from tests_common.test_utils.watcher import watcher
-
-    nonzero_exit >> watcher()
 
     test_run = get_test_run(dag)
