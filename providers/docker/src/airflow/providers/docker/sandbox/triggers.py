@@ -39,6 +39,7 @@ class DockerSandboxJobTrigger(BaseTrigger):
         scratch_root: str,
         sbx_binary: str = "sbx",
         poll_interval: float = 1.0,
+        keep: bool = False,
     ) -> None:
         super().__init__()
         self.handle_data = handle_data
@@ -46,6 +47,7 @@ class DockerSandboxJobTrigger(BaseTrigger):
         self.scratch_root = scratch_root
         self.sbx_binary = sbx_binary
         self.poll_interval = poll_interval
+        self.keep = keep
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         return (
@@ -56,6 +58,7 @@ class DockerSandboxJobTrigger(BaseTrigger):
                 "scratch_root": self.scratch_root,
                 "sbx_binary": self.sbx_binary,
                 "poll_interval": self.poll_interval,
+                "keep": self.keep,
             },
         )
 
@@ -67,25 +70,36 @@ class DockerSandboxJobTrigger(BaseTrigger):
             )
         )
         handle = SandboxHandle(data=self.handle_data, display_name=self.display_name)
-        event_identity = {
-            "handle_data": self.handle_data,
-            "display_name": self.display_name,
-        }
         try:
             while True:
                 result = await driver.get_status(handle)
                 if result.state in {SandboxState.SUCCEEDED, SandboxState.FAILED, SandboxState.GONE}:
                     yield TriggerEvent(
                         {
-                            **event_identity,
                             "state": result.state.value,
                             "exit_code": result.exit_code,
                             "message": result.message,
+                            "handle_data": self.handle_data,
+                            "display_name": self.display_name,
                         }
                     )
                     return
                 await asyncio.sleep(result.retry_after or self.poll_interval)
+        except asyncio.CancelledError:
+            # A deferred task clear cancels its Trigger. The Trigger owns the
+            # external wait at that point, so it must also terminate the exact
+            # external workload before propagating cancellation.
+            if not self.keep:
+                await driver.terminate(handle)
+            raise
         except Exception as error:
-            yield TriggerEvent({**event_identity, "state": "error", "message": str(error)})
+            yield TriggerEvent(
+                {
+                    "state": "error",
+                    "message": str(error),
+                    "handle_data": self.handle_data,
+                    "display_name": self.display_name,
+                }
+            )
         finally:
             await driver.close()
