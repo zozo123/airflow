@@ -35,6 +35,7 @@
     :caption: Guides
 
     Docker Sandboxes Executor <docker-sandbox-executor>
+    Docker Sandbox job operator <docker-sandbox-job-operator>
 
 .. toctree::
     :hidden:
