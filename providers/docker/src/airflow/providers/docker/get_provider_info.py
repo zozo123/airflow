@@ -37,7 +37,10 @@ def get_provider_info():
                 "integration-name": "Docker Sandboxes",
                 "external-doc-url": "https://docs.docker.com/ai/sandboxes/",
                 "logo": "/docs/integration-logos/Docker.png",
-                "how-to-guide": ["/docs/apache-airflow-providers-docker/docker-sandbox-executor.rst"],
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-docker/docker-sandbox-executor.rst",
+                    "/docs/apache-airflow-providers-docker/docker-sandbox-job-operator.rst",
+                ],
                 "tags": ["software"],
             },
             {
@@ -49,6 +52,10 @@ def get_provider_info():
         ],
         "operators": [
             {"integration-name": "Docker", "python-modules": ["airflow.providers.docker.operators.docker"]},
+            {
+                "integration-name": "Docker Sandboxes",
+                "python-modules": ["airflow.providers.docker.sandbox.operators"],
+            },
             {
                 "integration-name": "Docker Swarm",
                 "python-modules": ["airflow.providers.docker.operators.docker_swarm"],
