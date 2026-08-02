@@ -56,6 +56,13 @@ the handle again with the terminal event. This allows ``execute_complete`` to
 reconstruct the exact sandbox identity even when the worker process that
 launched the job no longer exists.
 
+Cancellation ownership follows Airflow's lifecycle boundary:
+
+* before deferral, the worker owns cancellation and ``on_kill`` terminates the
+  exact launched sandbox;
+* after deferral, the Trigger owns the external wait and terminates the sandbox
+  when the Trigger is cancelled because the task is cleared.
+
 The operator removes the sandbox after success, failure, timeout or task
 cancellation unless ``keep=True`` is explicitly configured.
 
@@ -86,9 +93,9 @@ real local Airflow stack and Docker Sandboxes daemon:
    * - Command timeout
      - Supervisor reports timeout, task fails, sandbox is removed
    * - Task cleared before launch acceptance
-     - Launch is fenced or the exact sandbox is terminated
-   * - Task cleared while running
-     - ``on_kill`` terminates the exact stable sandbox identity
+     - Worker cancellation fences or terminates the exact launched sandbox
+   * - Task cleared while deferred
+     - Trigger cancellation terminates the exact stable sandbox identity
    * - Worker restart after launch
      - Serialized trigger handle remains sufficient to finish and clean up
    * - Triggerer restart
