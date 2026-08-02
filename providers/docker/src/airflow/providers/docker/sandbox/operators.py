@@ -35,7 +35,17 @@ if TYPE_CHECKING:
 
 
 class DockerSandboxJobOperator(BaseOperator):
-    """Run one author-declared job in a local Docker Sandbox."""
+    """
+    Run one author-declared job in a local Docker Sandbox.
+
+    This is the task-scoped analogue of ``DockerOperator`` or
+    ``KubernetesPodOperator``. The sandbox job is the Airflow task's external
+    workload; it is not an Airflow executor and the sandbox image does not need
+    to contain the Task SDK.
+
+    Docker Sandboxes is currently a local development and conformance backend,
+    not a production multi-tenant execution service.
+    """
 
     template_fields = ("command", "env", "workdir")
 
@@ -74,15 +84,20 @@ class DockerSandboxJobOperator(BaseOperator):
         self._handle: SandboxHandle | None = None
 
     def execute(self, context: Context) -> dict[str, Any]:
+        request_id = self._request_id(context)
         driver = self._driver()
         try:
             self._handle = asyncio.run(
                 driver.launch(
                     SandboxLaunchRequest(
-                        request_id=self._request_id(context),
+                        request_id=request_id,
                         command=self.command,
                         env=self.env,
-                        provider_config={"template": self.template, "cpus": self.cpus, "memory": self.memory},
+                        provider_config={
+                            "template": self.template,
+                            "cpus": self.cpus,
+                            "memory": self.memory,
+                        },
                         workdir=self.workdir,
                         timeout_seconds=self.timeout_seconds,
                         ttl_seconds=self.ttl_seconds,
@@ -94,7 +109,7 @@ class DockerSandboxJobOperator(BaseOperator):
             asyncio.run(driver.close())
 
         if not self.deferrable:
-            return self._wait_synchronously(self._handle)
+            return self._wait_synchronously()
 
         self.defer(
             trigger=DockerSandboxJobTrigger(
@@ -103,6 +118,7 @@ class DockerSandboxJobOperator(BaseOperator):
                 scratch_root=self.scratch_root,
                 sbx_binary=self.sbx_binary,
                 poll_interval=self.poll_interval,
+                keep=self.keep,
             ),
             method_name="execute_complete",
         )
@@ -110,11 +126,21 @@ class DockerSandboxJobOperator(BaseOperator):
 
     def execute_complete(self, context: Context, event: dict[str, Any]) -> dict[str, Any]:
         del context
-        handle = self._handle_from_event(event)
+        handle_data = event.get("handle_data")
+        if not isinstance(handle_data, dict):
+            raise AirflowException("Docker Sandbox trigger event did not contain a persisted handle")
+        self._handle = SandboxHandle(
+            data=handle_data,
+            display_name=event.get("display_name"),
+        )
         state = event.get("state")
         try:
             if state == "succeeded":
-                return {"state": state, "exit_code": event.get("exit_code"), "message": event.get("message")}
+                return {
+                    "state": state,
+                    "exit_code": event.get("exit_code"),
+                    "message": event.get("message"),
+                }
             if state == "failed":
                 raise AirflowException(
                     f"Docker Sandbox job failed with exit code {event.get('exit_code')}: "
@@ -130,17 +156,20 @@ class DockerSandboxJobOperator(BaseOperator):
             )
         finally:
             if not self.keep:
-                self._terminate(handle)
+                self._terminate_current_handle()
 
     def on_kill(self) -> None:
-        if self._handle is not None and not self.keep:
-            self._terminate(self._handle)
+        # Before deferral, the worker owns cancellation and has the launch handle.
+        # After deferral, Trigger cancellation owns cleanup.
+        self._terminate_current_handle()
 
-    def _wait_synchronously(self, handle: SandboxHandle) -> dict[str, Any]:
+    def _wait_synchronously(self) -> dict[str, Any]:
+        if self._handle is None:
+            raise AirflowException("Docker Sandbox job has no launch handle")
         driver = self._driver()
         try:
             while True:
-                result = asyncio.run(driver.get_status(handle))
+                result = asyncio.run(driver.get_status(self._handle))
                 if result.state.value == "succeeded":
                     return {"state": "succeeded", "exit_code": result.exit_code, "message": result.message}
                 if result.state.value in {"failed", "gone"}:
@@ -151,32 +180,35 @@ class DockerSandboxJobOperator(BaseOperator):
                 time.sleep(result.retry_after or self.poll_interval)
         finally:
             if not self.keep:
-                asyncio.run(driver.terminate(handle))
+                asyncio.run(driver.terminate(self._handle))
             asyncio.run(driver.close())
 
-    def _terminate(self, handle: SandboxHandle) -> None:
+    def _terminate_current_handle(self) -> None:
+        if self._handle is None or self.keep:
+            return
         driver = self._driver()
         try:
-            asyncio.run(driver.terminate(handle))
+            asyncio.run(driver.terminate(self._handle))
         finally:
             asyncio.run(driver.close())
 
-    @staticmethod
-    def _handle_from_event(event: dict[str, Any]) -> SandboxHandle:
-        handle_data = event.get("handle_data")
-        if not isinstance(handle_data, dict):
-            raise AirflowException("Docker Sandbox trigger event has no durable handle")
-        display_name = event.get("display_name")
-        if display_name is not None and not isinstance(display_name, str):
-            raise AirflowException("Docker Sandbox trigger event has an invalid display name")
-        return SandboxHandle(data=handle_data, display_name=display_name)
-
     def _driver(self) -> DockerSandboxDriver:
         return DockerSandboxDriver(
-            DockerSandboxDriverConfig(scratch_root=self.scratch_root, sbx_binary=self.sbx_binary)
+            DockerSandboxDriverConfig(
+                scratch_root=self.scratch_root,
+                sbx_binary=self.sbx_binary,
+            )
         )
 
     def _request_id(self, context: Context) -> str:
         ti = context["ti"]
-        identity = "|".join((ti.dag_id, ti.run_id, ti.task_id, str(ti.map_index), str(ti.try_number)))
+        identity = "|".join(
+            (
+                ti.dag_id,
+                ti.run_id,
+                ti.task_id,
+                str(ti.map_index),
+                str(ti.try_number),
+            )
+        )
         return str(uuid5(NAMESPACE_URL, f"airflow-docker-sandbox-job:{identity}"))
