@@ -67,12 +67,17 @@ class DockerSandboxJobTrigger(BaseTrigger):
             )
         )
         handle = SandboxHandle(data=self.handle_data, display_name=self.display_name)
+        event_identity = {
+            "handle_data": self.handle_data,
+            "display_name": self.display_name,
+        }
         try:
             while True:
                 result = await driver.get_status(handle)
                 if result.state in {SandboxState.SUCCEEDED, SandboxState.FAILED, SandboxState.GONE}:
                     yield TriggerEvent(
                         {
+                            **event_identity,
                             "state": result.state.value,
                             "exit_code": result.exit_code,
                             "message": result.message,
@@ -81,6 +86,6 @@ class DockerSandboxJobTrigger(BaseTrigger):
                     return
                 await asyncio.sleep(result.retry_after or self.poll_interval)
         except Exception as error:
-            yield TriggerEvent({"state": "error", "message": str(error)})
+            yield TriggerEvent({**event_identity, "state": "error", "message": str(error)})
         finally:
             await driver.close()
