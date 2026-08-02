@@ -37,6 +37,27 @@ def operator(tmp_path):
     )
 
 
+@pytest.fixture
+def handle():
+    return SandboxHandle(
+        data={
+            "request_id": "234e4567-e89b-12d3-a456-426614174000",
+            "sandbox_name": "airflow-234e4567-e89b-12d3-a456-426614174000",
+            "sandbox_id": "sandbox-id",
+            "schema_version": 1,
+        },
+        display_name="airflow-234e4567-e89b-12d3-a456-426614174000",
+    )
+
+
+def event_for(handle, **values):
+    return {
+        "handle_data": handle.data,
+        "display_name": handle.display_name,
+        **values,
+    }
+
+
 def test_request_id_is_stable_for_one_task_attempt(operator):
     context = {
         "ti": SimpleNamespace(
@@ -47,20 +68,10 @@ def test_request_id_is_stable_for_one_task_attempt(operator):
             try_number=1,
         )
     }
-
     assert operator._request_id(context) == operator._request_id(context)
 
 
-def test_execute_defers_with_persisted_handle(operator):
-    handle = SandboxHandle(
-        data={
-            "request_id": "234e4567-e89b-12d3-a456-426614174000",
-            "sandbox_name": "airflow-234e4567-e89b-12d3-a456-426614174000",
-            "sandbox_id": "sandbox-id",
-            "schema_version": 1,
-        },
-        display_name="airflow-234e4567-e89b-12d3-a456-426614174000",
-    )
+def test_execute_defers_with_serialized_handle(operator, handle):
     driver = mock.Mock()
     driver.launch = mock.AsyncMock(return_value=handle)
     driver.close = mock.AsyncMock()
@@ -71,36 +82,45 @@ def test_execute_defers_with_persisted_handle(operator):
     with pytest.raises(RuntimeError, match="deferred"):
         operator.execute({"ti": mock.Mock()})
 
-    assert operator._handle == handle
-    operator.defer.assert_called_once()
+    trigger = operator.defer.call_args.kwargs["trigger"]
+    assert trigger.handle_data == handle.data
+    assert trigger.display_name == handle.display_name
 
 
-def test_execute_complete_returns_success_and_terminates(operator):
-    operator._handle = SandboxHandle(data={"id": "sandbox"})
-    operator._terminate_current_handle = mock.Mock()
+def test_execute_complete_reconstructs_handle_after_restart(operator, handle):
+    operator._handle = None
+    operator._terminate = mock.Mock()
 
-    result = operator.execute_complete({}, {"state": "succeeded", "exit_code": 0, "message": None})
+    result = operator.execute_complete(
+        {},
+        event_for(handle, state="succeeded", exit_code=0, message=None),
+    )
 
     assert result["state"] == "succeeded"
-    operator._terminate_current_handle.assert_called_once_with()
+    operator._terminate.assert_called_once_with(handle)
 
 
-def test_execute_complete_raises_on_failure(operator):
-    operator._handle = SandboxHandle(data={"id": "sandbox"})
-    operator._terminate_current_handle = mock.Mock()
+def test_execute_complete_raises_on_failure_and_terminates(operator, handle):
+    operator._terminate = mock.Mock()
 
     with pytest.raises(AirflowException, match="exit code 17"):
         operator.execute_complete(
             {},
-            {"state": "failed", "exit_code": 17, "message": "boom"},
+            event_for(handle, state="failed", exit_code=17, message="boom"),
         )
 
-    operator._terminate_current_handle.assert_called_once_with()
+    operator._terminate.assert_called_once_with(handle)
 
 
-def test_on_kill_terminates_current_job(operator):
-    operator._terminate_current_handle = mock.Mock()
+def test_execute_complete_rejects_missing_handle(operator):
+    with pytest.raises(AirflowException, match="no durable handle"):
+        operator.execute_complete({}, {"state": "succeeded"})
+
+
+def test_on_kill_terminates_current_job(operator, handle):
+    operator._handle = handle
+    operator._terminate = mock.Mock()
 
     operator.on_kill()
 
-    operator._terminate_current_handle.assert_called_once_with()
+    operator._terminate.assert_called_once_with(handle)
