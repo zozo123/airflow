@@ -32,6 +32,19 @@ jobs:
           uv run --project providers/common/ai --extra sandbox-ascii-box \
             pytest providers/common/ai/tests/unit/common/ai/sandbox/test_ascii_box.py -q
 
+      - name: Check changed Python formatting and lint
+        shell: bash
+        run: |
+          files=(
+            providers/common/ai/src/airflow/providers/common/ai/sandbox/ascii_box.py
+            providers/common/ai/src/airflow/providers/common/ai/sandbox/__init__.py
+            providers/common/ai/src/airflow/providers/common/ai/get_provider_info.py
+            providers/common/ai/tests/unit/common/ai/sandbox/test_ascii_box.py
+            providers/common/ai/tests/system/common/ai/example_sandbox_toolset_ascii_box.py
+          )
+          uv run --project providers/common/ai --extra sandbox-ascii-box ruff check "${files[@]}"
+          uv run --project providers/common/ai --extra sandbox-ascii-box ruff format --check "${files[@]}"
+
       - name: Verify system test collects with real optional SDK
         shell: bash
         run: |
@@ -180,6 +193,7 @@ jobs:
               "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
               "verified": [
                   "SDK-installed unit suite",
+                  "style and format checks",
                   "system-test collection",
                   "direct create and readiness",
                   "explicit environment mapping",
