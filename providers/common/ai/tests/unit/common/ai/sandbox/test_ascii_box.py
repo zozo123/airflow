@@ -186,7 +186,7 @@ class TestCreate:
     @mock.patch("ascii_box_sdk.wait_until_ready", autospec=True)
     def test_spec_and_sizing_are_passed_at_creation(self, wait_ready):
         backend, api = _backend_with_api(machine_type="small", ttl_seconds=120, ready_timeout=45, no_env=True)
-        api.create.return_value = SimpleNamespace(box=SimpleNamespace(id="bx_created1"))
+        api.create.return_value = SimpleNamespace(id="bx_created1")
 
         box_id = backend.create(spec=SandboxSpec(block_network=False, env={"TOKEN": "value"}))
 
@@ -272,6 +272,20 @@ class TestCreate:
             SandboxTerminalError, match=r"^Ascii Box could not create a sandbox \(HTTP 500\)\.$"
         ):
             backend.create(spec=SandboxSpec(block_network=False))
+
+
+    @mock.patch("ascii_box_sdk.wait_until_ready", autospec=True)
+    def test_wrapped_create_response_remains_supported(self, _wait_ready):
+        backend, api = _backend_with_api()
+        api.create.return_value = SimpleNamespace(box=SimpleNamespace(id="bx_wrapped1"))
+
+        assert backend.create(spec=SandboxSpec(block_network=False)) == "bx_wrapped1"
+
+    def test_confirm_exists_accepts_direct_box_response(self):
+        backend, api = _backend_with_api()
+        api.get.return_value = SimpleNamespace(id="bx_direct1", state="running")
+
+        backend._confirm_sandbox_exists("bx_direct1")
 
 
 class TestRunCommand:
