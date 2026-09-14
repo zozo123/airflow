@@ -19,8 +19,8 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import json
+import logging
 import math
 import shlex
 from contextlib import contextmanager, suppress
@@ -30,7 +30,6 @@ from airflow.providers.common.ai.sandbox.base import (
     SandboxBackend,
     SandboxError,
     SandboxExecResult,
-    SandboxFileTooLargeError,
     SandboxTerminalError,
     _new_sandbox_name,
     _validate_positive_finite,
@@ -44,6 +43,8 @@ if TYPE_CHECKING:
     from ascii_box_sdk.api.box_api import BoxApi
 
     from airflow.providers.common.ai.sandbox.base import SandboxSpec
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://ascii.dev/api/box/v1"
 _MAX_COMMAND_TIMEOUT = 600
@@ -154,8 +155,10 @@ class AsciiBoxSandboxBackend(SandboxBackend):
     that on :class:`~airflow.providers.common.ai.toolsets.sandbox.SandboxToolset`)
     when open egress is acceptable.
 
-    File paths must resolve under ``/home/user`` or ``/tmp``. Reads and writes
-    use Box's native file APIs; directory listings fall back to shell ``find``.
+    Writes use Box's native file API; reads use the inherited shell
+    implementation, because the native read API takes no size parameter and
+    would land a whole file in worker memory before ``max_bytes`` could reject
+    it. Written paths must resolve under ``/home/user`` or ``/tmp``.
 
     :param box_conn_id: Airflow connection ID for Ascii Box. ``None`` lets the
         backend read ``BOX_API_KEY`` (and optional ``BOX_BASE_URL``) from the
@@ -185,6 +188,10 @@ class AsciiBoxSandboxBackend(SandboxBackend):
         if machine_type not in _MACHINE_TYPES:
             raise ValueError(f"machine_type must be one of {sorted(_MACHINE_TYPES)}, got {machine_type!r}.")
         _validate_positive_finite(ttl_seconds, "ttl_seconds")
+        # int() would floor a fractional value, and the API reads 0 as "never
+        # auto-stop" -- silently discarding the only backstop against a leak.
+        if int(ttl_seconds) != ttl_seconds:
+            raise ValueError(f"ttl_seconds must be a whole number of seconds, got {ttl_seconds!r}.")
         _validate_positive_finite(ready_timeout, "ready_timeout")
         self._box_conn_id = box_conn_id
         self._machine_type = machine_type
@@ -275,7 +282,6 @@ class AsciiBoxSandboxBackend(SandboxBackend):
         api = self._get_api()
         with _translate_ascii_box_errors("create a sandbox"):
             from ascii_box_sdk.models.create_box_request import CreateBoxRequest
-            from ascii_box_sdk.models.update_box_request import UpdateBoxRequest
 
             created = api.create(
                 CreateBoxRequest(
@@ -287,14 +293,41 @@ class AsciiBoxSandboxBackend(SandboxBackend):
                 _request_timeout=self._http_timeout(self._ready_timeout),
             )
             box_id = created.box.id
+        try:
+            self._name_sandbox(box_id)
+            self._wait_until_ready(box_id)
+        except BaseException:
+            # The id has not reached the toolset yet, so nothing else can tear
+            # this Box down. The server-side TTL would archive it eventually,
+            # but that leaves a billed machine idling for an hour by default.
             with suppress(Exception):
-                api.update(
-                    box_id,
-                    UpdateBoxRequest(name=_new_sandbox_name()),
-                    _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT),
-                )
-        self._wait_until_ready(box_id)
+                self.destroy(box_id)
+            raise
         return box_id
+
+    def _name_sandbox(self, box_id: str) -> None:
+        """
+        Best-effort rename to the ``airflow-sandbox-`` prefix used for correlation.
+
+        Failing to name a Box costs nothing at run time, so it must not fail the
+        create -- but it does cost an operator sweeping for orphans later, which
+        is why it is logged rather than silently dropped.
+        """
+        from ascii_box_sdk.models.update_box_request import UpdateBoxRequest
+
+        try:
+            self._get_api().update(
+                box_id,
+                UpdateBoxRequest(name=_new_sandbox_name()),
+                _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT),
+            )
+        except Exception:
+            log.warning(
+                "Could not name Ascii Box %s; it keeps its server-assigned name and will not "
+                "match an airflow-sandbox-* orphan sweep.",
+                box_id,
+                exc_info=True,
+            )
 
     def _destroy_after_timeout(self, sandbox: str) -> None:
         try:
@@ -313,7 +346,7 @@ class AsciiBoxSandboxBackend(SandboxBackend):
             raise SandboxTerminalError(
                 f"Ascii Box commands are capped at {_MAX_COMMAND_TIMEOUT} seconds; got timeout={timeout}."
             )
-        timeout_seconds = max(1, min(_MAX_COMMAND_TIMEOUT, math.ceil(timeout)))
+        timeout_seconds = max(1, math.ceil(timeout))
         api = self._get_api()
         with _translate_ascii_box_errors("run a sandbox command"):
             from ascii_box_sdk.models.command_request import CommandRequest
@@ -371,36 +404,6 @@ class AsciiBoxSandboxBackend(SandboxBackend):
                 f"Ascii Box sandbox {sandbox!r} is not runnable (state={box.state!r})."
             )
 
-    def read_file(self, sandbox: str, path: str, *, max_bytes: int) -> bytes:
-        _validate_positive_finite(max_bytes, "max_bytes")
-        api = self._get_api()
-        try:
-            response = api.read_file(
-                sandbox,
-                path,
-                encoding="base64",
-                _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT),
-            )
-        except Exception as e:
-            from ascii_box_sdk.exceptions import ApiException
-
-            if isinstance(e, ApiException) and e.status == 404:
-                self._confirm_sandbox_exists(sandbox)
-                raise SandboxError(f"{path!r} does not exist in the sandbox, or is not readable.") from e
-            with _translate_ascii_box_errors("read a sandbox file", recoverable_statuses=frozenset({400})):
-                raise
-
-        size = getattr(response, "size", None)
-        if isinstance(size, int) and size > max_bytes:
-            raise SandboxFileTooLargeError(path, size, max_bytes)
-        try:
-            data = base64.b64decode(response.content, validate=False)
-        except (binascii.Error, ValueError) as e:
-            raise SandboxError(f"Could not decode {path!r} from the sandbox.") from e
-        if len(data) > max_bytes:
-            raise SandboxFileTooLargeError(path, len(data), max_bytes)
-        return data
-
     def write_file(self, sandbox: str, path: str, content: bytes) -> None:
         quoted = shlex.quote(path)
         self._run_helper(
@@ -447,6 +450,12 @@ class AsciiBoxSandboxBackend(SandboxBackend):
         return entries
 
     def destroy(self, sandbox: str) -> None:
+        """
+        Request permanent deletion of the Box.
+
+        The API accepts the request and returns before teardown finishes, so a
+        successful return means accepted, not gone.
+        """
         api = self._get_api()
         with _translate_ascii_box_errors("delete a sandbox"):
             from ascii_box_sdk.exceptions import ApiException

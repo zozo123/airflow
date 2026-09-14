@@ -96,6 +96,7 @@ def test_missing_sdk_error_is_actionable():
     [
         ({"machine_type": "xlarge"}, "machine_type"),
         ({"ttl_seconds": 0}, "ttl_seconds"),
+        ({"ttl_seconds": 0.5}, "whole number of seconds"),
         ({"ready_timeout": 0}, "ready_timeout"),
     ],
 )
@@ -208,6 +209,29 @@ class TestCreate:
         request = api.create.call_args.args[0]
         assert request.env is None
 
+    @mock.patch("ascii_box_sdk.wait_until_ready", autospec=True)
+    def test_a_box_that_never_becomes_ready_is_destroyed(self, wait_ready):
+        backend, api = _backend_with_api()
+        api.create.return_value = SimpleNamespace(box=SimpleNamespace(id="bx_stuck01"))
+        wait_ready.side_effect = TimeoutError("never became ready")
+        api.api_client.param_serialize.return_value = ("DELETE", "https://example/boxes", {}, None, None)
+        api.api_client.call_api.return_value = mock.MagicMock(status=202, read=mock.MagicMock())
+
+        with pytest.raises(SandboxTerminalError):
+            backend.create(spec=SandboxSpec(block_network=False))
+
+        # The id never reached the caller, so create is the only place that can
+        # still tear this Box down.
+        assert api.api_client.param_serialize.call_args.kwargs["path_params"] == {"boxId": "bx_stuck01"}
+
+    @mock.patch("ascii_box_sdk.wait_until_ready", autospec=True)
+    def test_an_unnameable_box_is_still_created(self, _wait_ready):
+        backend, api = _backend_with_api()
+        api.create.return_value = SimpleNamespace(box=SimpleNamespace(id="bx_created1"))
+        api.update.side_effect = _api_error(500)
+
+        assert backend.create(spec=SandboxSpec(block_network=False)) == "bx_created1"
+
     def test_api_failure_is_terminal(self):
         backend, api = _backend_with_api()
         api.create.side_effect = _api_error(503)
@@ -290,25 +314,33 @@ class TestRunCommand:
 
 
 class TestFiles:
-    def test_read_file_decodes_base64_and_enforces_budget(self):
+    def test_read_file_caps_the_transfer_inside_the_guest(self):
         backend, api = _backend_with_api()
         payload = b"hello-world"
-        api.read_file.return_value = SimpleNamespace(
-            content=base64.b64encode(payload).decode(), size=len(payload)
+        api.command.return_value = _command_result(
+            stdout=f"{len(payload)}\n{base64.b64encode(payload).decode()}"
         )
 
         assert backend.read_file("bx_1", "/tmp/a.txt", max_bytes=64) == payload
 
-        api.read_file.return_value = SimpleNamespace(
-            content=base64.b64encode(payload).decode(), size=len(payload)
+        # The guest, not the worker, is what bounds the read: the cap reaches it
+        # as a head -c argument rather than arriving after the bytes do.
+        assert f"head -c {64 + 1} --" in api.command.call_args.args[1].command
+        assert api.read_file.called is False
+
+    def test_read_file_rejects_a_file_over_budget(self):
+        backend, api = _backend_with_api()
+        payload = b"hello-world"
+        api.command.return_value = _command_result(
+            stdout=f"{len(payload)}\n{base64.b64encode(payload).decode()}"
         )
+
         with pytest.raises(SandboxFileTooLargeError):
             backend.read_file("bx_1", "/tmp/a.txt", max_bytes=4)
 
     def test_missing_file_is_recoverable(self):
         backend, api = _backend_with_api()
-        api.read_file.side_effect = _api_error(404)
-        api.get.return_value = SimpleNamespace(box=SimpleNamespace(state="ready"))
+        api.command.return_value = _command_result(exit_code=66)
 
         with pytest.raises(SandboxError, match="does not exist"):
             backend.read_file("bx_1", "/tmp/missing", max_bytes=10)
