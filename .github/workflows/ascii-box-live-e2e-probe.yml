@@ -18,7 +18,7 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --silent --show-error --retry 3 \
-            https://www.yossieliaz.com/.well-known/ascii-box-e2e-20260914.json \
+            https://6aa80b47db894f0008ea681f--yossieliaz.netlify.app/.well-known/ascii-box-e2e-20260914.json \
             -o /tmp/ascii-box-e2e.json
           cat /tmp/ascii-box-e2e.json
           python - <<'PY'
