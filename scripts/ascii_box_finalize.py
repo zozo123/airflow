@@ -55,6 +55,25 @@ if "integration-name: Ascii Box" not in text:
     text = text.replace(docker, docker + ascii_box, 1)
 provider.write_text(text)
 
+provider_info = Path("providers/common/ai/src/airflow/providers/common/ai/get_provider_info.py")
+text = provider_info.read_text()
+docker_info = '''            {
+                "integration-name": "Docker Sandboxes",
+                "external-doc-url": "https://docs.docker.com/ai/sandboxes/",
+                "tags": ["software"],
+            },
+'''
+ascii_info = '''            {
+                "integration-name": "Ascii Box",
+                "external-doc-url": "https://docs.ascii.dev/box/quickstart",
+                "tags": ["service"],
+            },
+'''
+if '"integration-name": "Ascii Box"' not in text:
+    assert docker_info in text
+    text = text.replace(docker_info, docker_info + ascii_info, 1)
+provider_info.write_text(text)
+
 docs = Path("providers/common/ai/docs/toolsets.rst")
 text = docs.read_text()
 old_warning = """   Treat it as the backend you develop and test a sandboxed agent against, then
