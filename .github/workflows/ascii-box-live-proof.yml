@@ -6,16 +6,46 @@ on:
       - ascii-box-e2e-proof-20260914
     paths:
       - .github/workflows/ascii-box-live-proof.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    env:
+      PR_HEAD: d9669d15d521478c15dfa7832059bfb6a57bf265
+    steps:
+      - name: Check out proof branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ascii-box-e2e-proof-20260914
+          fetch-depth: 1
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv
+
+      - name: Run focused Ascii Box unit tests with real optional SDK
+        shell: bash
+        run: |
+          uv run --project providers/common/ai --extra sandbox-ascii-box \
+            pytest providers/common/ai/tests/unit/common/ai/sandbox/test_ascii_box.py -q
+
+      - name: Verify system test collects with real optional SDK
+        shell: bash
+        run: |
+          uv run --project providers/common/ai --extra sandbox-ascii-box \
+            pytest --system \
+            providers/common/ai/tests/system/common/ai/example_sandbox_toolset_ascii_box.py \
+            --collect-only -q
+
   live-e2e:
+    needs: preflight
     runs-on: ubuntu-22.04
     env:
       BOX_API_KEY: ${{ secrets.BOX_API_KEY }}
-      PR_HEAD: 2de705589169153c22d97bdd5edd0af9c84b0bae
+      PR_HEAD: d9669d15d521478c15dfa7832059bfb6a57bf265
     steps:
       - name: Check out proof branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -33,8 +63,7 @@ jobs:
           echo "BOX_API_KEY is present and remains masked by GitHub Actions."
 
       - name: Install uv and GIF dependency
-        run: |
-          python -m pip install --disable-pip-version-check uv pillow
+        run: python -m pip install --disable-pip-version-check uv pillow
 
       - name: Run real SandboxToolset system test against Ascii Box
         shell: bash
@@ -64,10 +93,10 @@ jobs:
 
           frames = []
           pages = [
-              ("Apache Airflow #71725", ["Ascii Box live E2E", "GitHub Actions • real provider code"]),
+              ("Apache Airflow #71725", ["Ascii Box live E2E", "GitHub Actions • exact current PR code"]),
               ("Sandbox boundary", ["SandboxToolset ✓", "AsciiBoxSandboxBackend ✓", "Real Ascii Box API ✓"]),
               ("Operations verified", ["create / ready ✓", "write_file ✓", "run_command ✓", "read_file ✓", "list_directory ✓", "destroy ✓"]),
-              ("LIVE E2E PASS", ["34 SDK-installed unit tests already passed", "System test passed end-to-end", f"PR head: {os.environ['PR_HEAD'][:12]}"])
+              ("LIVE E2E PASS", ["SDK-installed unit tests passed", "System test passed end-to-end", f"PR head: {os.environ['PR_HEAD'][:12]}"])
           ]
           for heading, lines in pages:
               img = Image.new("RGB", (W, H), "white")
