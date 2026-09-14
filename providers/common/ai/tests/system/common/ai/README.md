@@ -52,5 +52,7 @@ export BOX_API_KEY="..."
 pytest --system providers/common/ai/tests/system/common/ai/example_sandbox_toolset_ascii_box.py
 ```
 
-The test requests open egress (`SandboxSpec(block_network=False)`), because Ascii Box
-cannot enforce a deny-all network policy, and a 15-minute server-side TTL.
+With `box_conn_id=None`, the backend reads this key lazily in the worker process; it is not copied
+into `SandboxSpec.env` or exposed inside the Box. The test requests open egress
+(`SandboxSpec(block_network=False)`), because Ascii Box cannot enforce a deny-all network policy,
+and a 15-minute server-side TTL.
