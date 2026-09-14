@@ -273,7 +273,6 @@ class TestCreate:
         ):
             backend.create(spec=SandboxSpec(block_network=False))
 
-
     @mock.patch("ascii_box_sdk.wait_until_ready", autospec=True)
     def test_wrapped_create_response_remains_supported(self, _wait_ready):
         backend, api = _backend_with_api()
@@ -304,6 +303,15 @@ class TestRunCommand:
         assert result.stdout_truncated
         assert result.stderr == "err"
         assert result.exit_code == 0
+
+    def test_output_bound_drops_a_partial_leading_line(self):
+        backend, api = _backend_with_api()
+        api.command.return_value = _command_result(stdout="alpha\nbeta\ngamma")
+
+        result = backend.run_command("bx_1", "echo hi", timeout=5, max_output_bytes=9)
+
+        assert result.stdout == "gamma"
+        assert result.stdout_truncated
 
     def test_rejects_timeout_above_api_cap(self):
         backend, _ = _backend_with_api()
@@ -382,6 +390,17 @@ class TestDestroy:
         backend.destroy("bx_1")
 
         assert api.api_client.call_api.called
+
+    def test_repeated_accepted_delete_is_idempotent_while_teardown_is_pending(self):
+        backend, api = _backend_with_api()
+        api.api_client.param_serialize.return_value = ("DELETE", "https://example/boxes/bx_1", {}, None, None)
+        responses = [mock.MagicMock(status=202, read=mock.MagicMock()) for _ in range(2)]
+        api.api_client.call_api.side_effect = responses
+
+        backend.destroy("bx_1")
+        backend.destroy("bx_1")
+
+        assert api.api_client.call_api.call_count == 2
 
     def test_delete_sends_confirm_header(self):
         backend, api = _backend_with_api()

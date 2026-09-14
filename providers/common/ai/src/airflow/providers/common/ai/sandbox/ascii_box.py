@@ -121,7 +121,17 @@ def _bound_text(text: str, max_bytes: int, *, already_truncated: bool = False) -
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text, already_truncated
-    return encoded[-max_bytes:].decode("utf-8", errors="ignore"), True
+
+    cutoff = len(encoded) - max_bytes
+    bounded = encoded[cutoff:]
+    # Match the toolset's whole-record truncation contract: when the byte cut
+    # lands inside a line, drop that fragment if a complete later line exists.
+    # If this is one overlong line, keep its useful suffix instead.
+    if encoded[cutoff - 1 : cutoff] != b"\n":
+        newline = bounded.find(b"\n")
+        if 0 <= newline < len(bounded) - 1:
+            bounded = bounded[newline + 1 :]
+    return bounded.decode("utf-8", errors="ignore"), True
 
 
 def _parse_bool(value: Any, name: str) -> bool:

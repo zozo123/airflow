@@ -53,6 +53,8 @@ pytest --system providers/common/ai/tests/system/common/ai/example_sandbox_tools
 ```
 
 With `box_conn_id=None`, the backend reads this key lazily in the worker process; it is not copied
-into `SandboxSpec.env` or exposed inside the Box. The test requests open egress
-(`SandboxSpec(block_network=False)`), because Ascii Box cannot enforce a deny-all network policy,
-and a 15-minute server-side TTL.
+into `SandboxSpec.env` or exposed inside the Box. The test passes a separate non-secret marker
+through `SandboxSpec.env` and verifies it from a sandbox command, exercises successful and
+non-zero command exits plus write/read/list operations, and requests open egress
+(`SandboxSpec(block_network=False)`) because Ascii Box cannot enforce a deny-all network policy.
+A 15-minute server-side TTL is the cleanup backstop if worker-side teardown cannot run.
