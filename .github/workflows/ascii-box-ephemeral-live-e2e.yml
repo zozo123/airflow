@@ -1,0 +1,131 @@
+name: Ascii Box ephemeral live E2E
+
+on:
+  push:
+    branches:
+      - ascii-box-e2e-ephemeral-20260914
+
+permissions:
+  contents: write
+
+jobs:
+  live-e2e:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact provider branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Publish one-time public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ascii-box-e2e
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/box-e2e-private.pem >/dev/null 2>&1
+          chmod 600 /tmp/box-e2e-private.pem
+          openssl pkey -in /tmp/box-e2e-private.pem -pubout -out .ascii-box-e2e/public.pem >/dev/null 2>&1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .ascii-box-e2e/public.pem
+          git commit -m "[skip ci] Publish ephemeral Ascii Box E2E public key"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Receive encrypted credential in memory boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          for _ in $(seq 1 180); do
+            git fetch origin "${GITHUB_REF_NAME}" --quiet
+            if git show "origin/${GITHUB_REF_NAME}:.ascii-box-e2e/ciphertext.b64" > /tmp/box-e2e-ciphertext.b64 2>/dev/null; then
+              found=1
+              break
+            fi
+            sleep 4
+          done
+          test "$found" -eq 1
+          base64 --decode /tmp/box-e2e-ciphertext.b64 > /tmp/box-e2e-ciphertext.bin
+          BOX_API_KEY="$(openssl pkeyutl -decrypt -inkey /tmp/box-e2e-private.pem -in /tmp/box-e2e-ciphertext.bin -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256)"
+          test -n "$BOX_API_KEY"
+          echo "::add-mask::$BOX_API_KEY"
+          printf '%s' "$BOX_API_KEY" > /tmp/box-e2e-api-key
+          chmod 600 /tmp/box-e2e-api-key
+          echo "credential-decrypted-and-masked"
+
+      - name: Run real AsciiBoxSandboxBackend E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          export BOX_API_KEY="$(cat /tmp/box-e2e-api-key)"
+          echo "::add-mask::$BOX_API_KEY"
+          uv run --project providers/common/ai --extra sandbox-ascii-box python - <<'PY'
+          from airflow.providers.common.ai.sandbox import AsciiBoxSandboxBackend, SandboxSpec
+
+          marker = "AIRFLOW_ASCII_BOX_E2E_OK"
+          payload = b"airflow-ascii-box-live-file-e2e"
+          backend = AsciiBoxSandboxBackend(
+              box_conn_id=None,
+              machine_type="small",
+              ttl_seconds=300,
+              ready_timeout=120,
+              no_env=True,
+          )
+          sandbox = None
+          try:
+              sandbox = backend.create(
+                  spec=SandboxSpec(
+                      block_network=False,
+                      env={"AIRFLOW_ASCII_BOX_E2E_ENV": "env-ok"},
+                  )
+              )
+              print("e2e:create:ok")
+
+              result = backend.run_command(
+                  sandbox,
+                  f"printf '%s' '{marker}'",
+                  timeout=30,
+                  max_output_bytes=4096,
+              )
+              assert result.exit_code == 0
+              assert result.stdout == marker
+              assert not result.timed_out
+              print("e2e:command:ok")
+
+              env_result = backend.run_command(
+                  sandbox,
+                  "printf '%s' \"$AIRFLOW_ASCII_BOX_E2E_ENV\"",
+                  timeout=30,
+                  max_output_bytes=4096,
+              )
+              assert env_result.exit_code == 0
+              assert env_result.stdout == "env-ok"
+              print("e2e:env:ok")
+
+              path = "/tmp/airflow-ascii-box-e2e/marker.bin"
+              backend.write_file(sandbox, path, payload)
+              assert backend.read_file(sandbox, path, max_bytes=4096) == payload
+              entries = backend.list_directory(sandbox, "/tmp/airflow-ascii-box-e2e")
+              assert ("marker.bin", False) in entries
+              print("e2e:file-ops:ok")
+          finally:
+              if sandbox is not None:
+                  backend.destroy(sandbox)
+                  print("e2e:destroy:ok")
+          print("ASCII-BOX-LIVE-E2E-PASS")
+          PY
+
+      - name: Erase ephemeral credential material
+        if: always()
+        shell: bash
+        run: |
+          rm -f /tmp/box-e2e-private.pem /tmp/box-e2e-ciphertext.b64 /tmp/box-e2e-ciphertext.bin /tmp/box-e2e-api-key
