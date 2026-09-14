@@ -15,7 +15,7 @@ jobs:
   preflight:
     runs-on: ubuntu-22.04
     env:
-      PR_HEAD: d9669d15d521478c15dfa7832059bfb6a57bf265
+      PR_HEAD: 878317910c7674d82437d686bedca355a87964b3
     steps:
       - name: Check out proof branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       BOX_API_KEY: ${{ secrets.BOX_API_KEY }}
-      PR_HEAD: d9669d15d521478c15dfa7832059bfb6a57bf265
+      PR_HEAD: 878317910c7674d82437d686bedca355a87964b3
     steps:
       - name: Check out proof branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
