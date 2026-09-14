@@ -409,9 +409,7 @@ class AsciiBoxSandboxBackend(SandboxBackend):
 
     def _confirm_sandbox_exists(self, sandbox: str) -> None:
         with _translate_ascii_box_errors("confirm that a sandbox still exists"):
-            response = self._get_api().get(
-                sandbox, _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT)
-            )
+            response = self._get_api().get(sandbox, _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT))
             box = getattr(response, "box", response)
         if box.state not in _READY_STATES:
             raise SandboxTerminalError(
