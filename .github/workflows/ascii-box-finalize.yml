@@ -28,17 +28,30 @@ jobs:
 
           backend = Path("providers/common/ai/src/airflow/providers/common/ai/sandbox/ascii_box.py")
           text = backend.read_text()
-          marker = "_MACHINE_TYPES = frozenset({\"small\", \"default\", \"large\"})\n\n\n"
-          helper = '''_MACHINE_TYPES = frozenset({"small", "default", "large"})\n\n\ndef _box_from_response(response: Any) -> Any:\n    """Return the Box model from SDK versions that return it directly or wrapped."""\n    return getattr(response, "box", response)\n\n\n'''
-          if "def _box_from_response" not in text:
-              assert marker in text
-              text = text.replace(marker, helper, 1)
-          assert "box_id = created.box.id" in text
-          text = text.replace("box_id = created.box.id", "box_id = _box_from_response(created).id", 1)
-          old = 'box = self._get_api().get(sandbox, _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT)).box'
-          new = 'box = _box_from_response(\n            self._get_api().get(sandbox, _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT))\n        )'
-          assert old in text
-          text = text.replace(old, new, 1)
+
+          # Keep compatibility with SDK versions that return a Box directly or
+          # wrap it under `.box` for both create and get.
+          if "box_id = created.box.id" in text:
+              text = text.replace(
+                  "            box_id = created.box.id\n",
+                  "            created_box = getattr(created, \"box\", created)\n"
+                  "            box_id = created_box.id\n",
+                  1,
+              )
+          assert "created_box = getattr(created, \"box\", created)" in text
+
+          old = "            box = self._get_api().get(sandbox, _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT)).box\n"
+          new = (
+              "            response = self._get_api().get(\n"
+              "                sandbox, _request_timeout=self._http_timeout(_FILE_OP_TIMEOUT)\n"
+              "            )\n"
+              "            box = getattr(response, \"box\", response)\n"
+          )
+          if old in text:
+              text = text.replace(old, new, 1)
+          assert "box = getattr(response, \"box\", response)" in text
+
+          # Do not claim a path restriction the backend does not implement.
           text = text.replace(
               "    implementation, because the native read API takes no size parameter and\n"
               "    would land a whole file in worker memory before ``max_bytes`` could reject\n"
@@ -69,12 +82,74 @@ jobs:
 
           docs = Path("providers/common/ai/docs/toolsets.rst")
           text = docs.read_text()
-          old_warning = '''   Treat it as the backend you develop and test a sandboxed agent against, then\n   run something else in production. A hosted backend plugs in through\n   :class:`~airflow.providers.common.ai.sandbox.SandboxBackend`, but none ships\n   with the provider yet.\n'''
-          new_warning = '''   Treat it as the backend you develop and test a sandboxed agent against, then\n   run something else in production -- either\n   :class:`~airflow.providers.common.ai.sandbox.AsciiBoxSandboxBackend` below,\n   or your own hosted backend behind\n   :class:`~airflow.providers.common.ai.sandbox.SandboxBackend`.\n'''
+          old_warning = '''   Treat it as the backend you develop and test a sandboxed agent against, then
+   run something else in production. A hosted backend plugs in through
+   :class:`~airflow.providers.common.ai.sandbox.SandboxBackend`, but none ships
+   with the provider yet.
+'''
+          new_warning = '''   Treat it as the backend you develop and test a sandboxed agent against, then
+   run something else in production -- either
+   :class:`~airflow.providers.common.ai.sandbox.AsciiBoxSandboxBackend` below,
+   or your own hosted backend behind
+   :class:`~airflow.providers.common.ai.sandbox.SandboxBackend`.
+'''
           if old_warning in text:
               text = text.replace(old_warning, new_warning, 1)
 
-          section = '''Ascii Box backend\n^^^^^^^^^^^^^^^^^\n\n:class:`~airflow.providers.common.ai.sandbox.AsciiBoxSandboxBackend` runs each\nsandbox in an `Ascii Box <https://docs.ascii.dev/box/quickstart>`__, a hosted\ncloud-computer API. The Airflow worker needs only network access and an API key;\nit needs no local daemon, Docker socket, KVM, or nested virtualization.\n\nInstall the optional SDK with the ``sandbox-ascii-box`` extra::\n\n    pip install "apache-airflow-providers-common-ai[sandbox-ascii-box]"\n\n.. code-block:: python\n\n    from airflow.providers.common.ai.sandbox import AsciiBoxSandboxBackend, SandboxSpec\n    from airflow.providers.common.ai.toolsets import SandboxToolset\n\n    SandboxToolset(\n        AsciiBoxSandboxBackend(box_conn_id="ascii_box_default"),\n        spec=SandboxSpec(block_network=False),\n    )\n\nBy default, credentials resolve lazily from a generic Airflow connection on\nfirst use, so the API key can remain in the configured secrets backend:\n\n- ``password``: Box API key. Required.\n- ``host``: API base URL. Optional; defaults to ``https://ascii.dev/api/box/v1``.\n- Extra ``timeout``: HTTP request timeout in seconds.\n- Extra ``no_env``: whether Box should withhold account-stored secrets. Defaults\n  to ``true``.\n\nConstructor parameters:\n\n- ``box_conn_id``: Connection ID. Default ``"ascii_box_default"``. Passing\n  ``None`` reads ``BOX_API_KEY`` and optional ``BOX_BASE_URL`` from the worker\n  environment instead.\n- ``machine_type``: ``"small"``, ``"default"``, or ``"large"``.\n- ``ttl_seconds``: server-side auto-stop TTL. Default ``3600`` seconds.\n- ``ready_timeout``: provisioning deadline. Default ``300`` seconds.\n- ``no_env``: explicit override for the connection's ``no_env`` setting.\n\n``SandboxSpec.env`` is passed when the Box is created. Box cannot enforce a\ndeny-all network policy or a per-domain egress allowlist, so the backend refuses\n``block_network=True`` and ``allow_egress_to`` rather than silently weakening\nthe requested isolation. Use ``SandboxSpec(block_network=False)`` only when open\negress is acceptable.\n\nWrites use Box's native file API. Reads deliberately use the inherited bounded\nshell implementation so ``max_bytes`` is enforced inside the guest before file\ncontents reach worker memory. Command timeouts are capped at 600 seconds; a Box\nwhose command times out, or that never becomes ready, is torn down immediately,\nwith the server-side TTL as the orphan-cleanup backstop.\n\n'''
+          section = '''Ascii Box backend
+^^^^^^^^^^^^^^^^^
+
+:class:`~airflow.providers.common.ai.sandbox.AsciiBoxSandboxBackend` runs each
+sandbox in an `Ascii Box <https://docs.ascii.dev/box/quickstart>`__, a hosted
+cloud-computer API. The Airflow worker needs only network access and an API key;
+it needs no local daemon, Docker socket, KVM, or nested virtualization.
+
+Install the optional SDK with the ``sandbox-ascii-box`` extra::
+
+    pip install "apache-airflow-providers-common-ai[sandbox-ascii-box]"
+
+.. code-block:: python
+
+    from airflow.providers.common.ai.sandbox import AsciiBoxSandboxBackend, SandboxSpec
+    from airflow.providers.common.ai.toolsets import SandboxToolset
+
+    SandboxToolset(
+        AsciiBoxSandboxBackend(box_conn_id="ascii_box_default"),
+        spec=SandboxSpec(block_network=False),
+    )
+
+By default, credentials resolve lazily from a generic Airflow connection on
+first use, so the API key can remain in the configured secrets backend:
+
+- ``password``: Box API key. Required.
+- ``host``: API base URL. Optional; defaults to ``https://ascii.dev/api/box/v1``.
+- Extra ``timeout``: HTTP request timeout in seconds.
+- Extra ``no_env``: whether Box should withhold account-stored secrets. Defaults
+  to ``true``.
+
+Constructor parameters:
+
+- ``box_conn_id``: Connection ID. Default ``"ascii_box_default"``. Passing
+  ``None`` reads ``BOX_API_KEY`` and optional ``BOX_BASE_URL`` from the worker
+  environment instead.
+- ``machine_type``: ``"small"``, ``"default"``, or ``"large"``.
+- ``ttl_seconds``: server-side auto-stop TTL. Default ``3600`` seconds.
+- ``ready_timeout``: provisioning deadline. Default ``300`` seconds.
+- ``no_env``: explicit override for the connection's ``no_env`` setting.
+
+``SandboxSpec.env`` is passed when the Box is created. Box cannot enforce a
+deny-all network policy or a per-domain egress allowlist, so the backend refuses
+``block_network=True`` and ``allow_egress_to`` rather than silently weakening
+the requested isolation. Use ``SandboxSpec(block_network=False)`` only when open
+egress is acceptable.
+
+Writes use Box's native file API. Reads deliberately use the inherited bounded
+shell implementation so ``max_bytes`` is enforced inside the guest before file
+contents reach worker memory. Command timeouts are capped at 600 seconds; a Box
+whose command times out, or that never becomes ready, is torn down immediately,
+with the server-side TTL as the orphan-cleanup backstop.
+
+'''
           anchor = "Bringing your own backend\n^^^^^^^^^^^^^^^^^^^^^^^^^\n"
           if "Ascii Box backend\n^^^^^^^^^^^^^^^^^" not in text:
               assert anchor in text
