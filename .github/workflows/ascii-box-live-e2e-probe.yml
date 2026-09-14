@@ -1,0 +1,99 @@
+name: Ascii Box live E2E probe
+
+on:
+  push:
+    branches:
+      - ascii-box-e2e-probe-20260914
+
+permissions:
+  contents: read
+
+jobs:
+  live-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout probe branch
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Prepare provider environment without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --project providers/common/ai --extra sandbox-ascii-box python - <<'PY'
+          import ascii_box_sdk
+          from airflow.providers.common.ai.sandbox.ascii_box import AsciiBoxSandboxBackend
+          print("provider-import-ok")
+          PY
+
+      - name: Live create-command-files-destroy probe
+        shell: bash
+        env:
+          BOX_SECRET_1: ${{ secrets.BOX_API_KEY }}
+          BOX_SECRET_2: ${{ secrets.ASCII_BOX_API_KEY }}
+          BOX_SECRET_3: ${{ secrets.ASCII_API_KEY }}
+          BOX_SECRET_4: ${{ secrets.ASCII_BOX_KEY }}
+          BOX_SECRET_5: ${{ secrets.BOX_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [[ -n "$BOX_SECRET_1" ]]; then
+            export BOX_API_KEY="$BOX_SECRET_1"
+          elif [[ -n "$BOX_SECRET_2" ]]; then
+            export BOX_API_KEY="$BOX_SECRET_2"
+          elif [[ -n "$BOX_SECRET_3" ]]; then
+            export BOX_API_KEY="$BOX_SECRET_3"
+          elif [[ -n "$BOX_SECRET_4" ]]; then
+            export BOX_API_KEY="$BOX_SECRET_4"
+          elif [[ -n "$BOX_SECRET_5" ]]; then
+            export BOX_API_KEY="$BOX_SECRET_5"
+          else
+            echo "No configured Box repository secret was found under the supported aliases."
+            exit 78
+          fi
+          unset BOX_SECRET_1 BOX_SECRET_2 BOX_SECRET_3 BOX_SECRET_4 BOX_SECRET_5
+
+          uv run --project providers/common/ai --extra sandbox-ascii-box python - <<'PY'
+          from airflow.providers.common.ai.sandbox import AsciiBoxSandboxBackend, SandboxSpec
+
+          marker = "AIRFLOW_ASCII_BOX_E2E_OK"
+          payload = b"airflow-ascii-box-file-e2e"
+          backend = AsciiBoxSandboxBackend(
+              box_conn_id=None,
+              ttl_seconds=300,
+              ready_timeout=120,
+              no_env=True,
+          )
+          sandbox = None
+          try:
+              sandbox = backend.create(spec=SandboxSpec(block_network=False))
+              print("create-ok")
+
+              result = backend.run_command(
+                  sandbox,
+                  f"printf '%s' '{marker}'",
+                  timeout=30,
+                  max_output_bytes=4096,
+              )
+              assert result.exit_code == 0, f"command exit={result.exit_code}"
+              assert result.stdout == marker, "command marker mismatch"
+              assert not result.timed_out, "command unexpectedly timed out"
+              print("command-ok")
+
+              path = "/tmp/airflow-ascii-box-e2e/marker.bin"
+              backend.write_file(sandbox, path, payload)
+              assert backend.read_file(sandbox, path, max_bytes=4096) == payload
+              entries = backend.list_directory(sandbox, "/tmp/airflow-ascii-box-e2e")
+              assert ("marker.bin", False) in entries, f"file missing from listing: {entries!r}"
+              print("file-ops-ok")
+          finally:
+              if sandbox is not None:
+                  backend.destroy(sandbox)
+                  print("destroy-ok")
+          print("LIVE-E2E-PASS")
+          PY
