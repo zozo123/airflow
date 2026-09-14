@@ -292,7 +292,8 @@ class AsciiBoxSandboxBackend(SandboxBackend):
                 ),
                 _request_timeout=self._http_timeout(self._ready_timeout),
             )
-            box_id = created.box.id
+            created_box = getattr(created, "box", created)
+            box_id = created_box.id
         try:
             self._name_sandbox(box_id)
             self._wait_until_ready(box_id)
