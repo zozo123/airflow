@@ -26,6 +26,20 @@ set +e
 pytest "${@}"
 RES=$?
 
+# Handle empty DB selections before Breeze aggregates nonzero child statuses into a failure.
+if [[ ${RES} == "5" && ${TEST_GROUP:-} == "providers" ]]; then
+    for arg in "${@}"; do
+        if [[ ${arg} == "--" ]]; then
+            break
+        fi
+        if [[ ${arg} == "--run-db-tests-only" ]]; then
+            echo "No DB tests were collected for providers; treating as success."
+            RES=0
+            break
+        fi
+    done
+fi
+
 if [[ ${RES} == "139" ]]; then
     echo "${COLOR_YELLOW}Sometimes Pytest fails at exiting with segfault, but all tests actually passed${COLOR_RESET}"
     echo "${COLOR_YELLOW}We should ignore such case. Checking if junitxml file ${RESULT_LOG_FILE} is there with 0 errors and failures${COLOR_RESET}"
