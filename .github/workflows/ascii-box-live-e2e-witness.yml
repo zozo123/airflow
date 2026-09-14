@@ -1,0 +1,33 @@
+name: Ascii Box live E2E witness
+
+on:
+  push:
+    branches:
+      - ascii-box-e2e-probe-20260914
+
+permissions:
+  contents: read
+
+jobs:
+  witness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch and verify sanitized live result
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            https://www.yossieliaz.com/.well-known/ascii-box-e2e-20260914.json \
+            -o /tmp/ascii-box-e2e.json
+          cat /tmp/ascii-box-e2e.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path('/tmp/ascii-box-e2e.json').read_text())
+          required = ['backend_import', 'create', 'command', 'write_read', 'list_directory', 'destroy']
+          assert result.get('success') is True, result
+          assert all(result.get(key) is True for key in required), result
+          print('LIVE-E2E-WITNESS-PASS')
+          PY
