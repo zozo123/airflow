@@ -27,6 +27,7 @@ ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
 DAG_ID = f"common_ai_sandbox_toolset_ascii_box_{ENV_ID}" if ENV_ID else "common_ai_sandbox_toolset_ascii_box"
 
 MARKER = "boundary-ok"
+ENV_MARKER = "env-ok"
 STATE_PATH = "/tmp/airflow_sandbox_e2e"
 
 
@@ -73,13 +74,18 @@ def example_sandbox_toolset_ascii_box():
                     parts=[
                         ToolCallPart(
                             tool_name="run_command",
-                            args={"command": f"cat {STATE_PATH} && echo $((6 * 7))"},
+                            args={
+                                "command": (
+                                    f"printf '%s|%s|%s\\n' \"$(cat {STATE_PATH})\" "
+                                    '"$AIRFLOW_ASCII_E2E_ENV" "$((6 * 7))"'
+                                )
+                            },
                             tool_call_id="shell",
                         )
                     ]
                 )
             shell_out = str(returns[1])
-            if MARKER not in shell_out or "42" not in shell_out:
+            if f"{MARKER}|{ENV_MARKER}|42" not in shell_out:
                 raise RuntimeError(f"Unexpected run_command result: {shell_out!r}")
 
             if len(returns) == 2:
@@ -119,8 +125,11 @@ def example_sandbox_toolset_ascii_box():
             instructions="Use the sandbox tools as requested.",
             toolsets=[
                 SandboxToolset(
-                    AsciiBoxSandboxBackend(box_conn_id=None, ttl_seconds=900, machine_type="small"),
-                    spec=SandboxSpec(block_network=False),
+                    AsciiBoxSandboxBackend(box_conn_id=None, ttl_seconds=900),
+                    spec=SandboxSpec(
+                        block_network=False,
+                        env={"AIRFLOW_ASCII_E2E_ENV": ENV_MARKER},
+                    ),
                 )
             ],
         )
