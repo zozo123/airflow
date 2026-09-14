@@ -65,6 +65,60 @@ jobs:
       - name: Install uv and GIF dependency
         run: python -m pip install --disable-pip-version-check uv pillow
 
+      - name: Verify direct Ascii Box lifecycle
+        shell: bash
+        run: |
+          uv run --project providers/common/ai --extra sandbox-ascii-box python - <<'PY'
+          from contextlib import suppress
+
+          from airflow.providers.common.ai.sandbox import AsciiBoxSandboxBackend, SandboxSpec
+
+          backend = AsciiBoxSandboxBackend(
+              box_conn_id=None,
+              ttl_seconds=900,
+              ready_timeout=300,
+          )
+          sandbox = None
+          try:
+              sandbox = backend.create(
+                  spec=SandboxSpec(
+                      block_network=False,
+                      env={"AIRFLOW_ASCII_E2E_ENV": "env-ok"},
+                  )
+              )
+
+              result = backend.run_command(
+                  sandbox,
+                  'printf "command-ok|%s" "$AIRFLOW_ASCII_E2E_ENV"',
+                  timeout=60,
+                  max_output_bytes=4096,
+              )
+              assert result.exit_code == 0, result
+              assert not result.timed_out, result
+              assert result.stdout.strip() == "command-ok|env-ok", result.stdout
+
+              path = "/tmp/airflow_ascii_e2e/state.txt"
+              payload = b"boundary-ok\n"
+              backend.write_file(sandbox, path, payload)
+              assert backend.read_file(sandbox, path, max_bytes=1024) == payload
+
+              entries = backend.list_directory(sandbox, "/tmp/airflow_ascii_e2e")
+              assert ("state.txt", False) in entries, entries
+
+              # destroy() guarantees that the delete request was accepted, not that
+              # asynchronous remote teardown has already completed. Calling it twice
+              # also verifies the backend's required idempotent teardown contract.
+              backend.destroy(sandbox)
+              backend.destroy(sandbox)
+              sandbox = None
+          finally:
+              if sandbox is not None:
+                  with suppress(Exception):
+                      backend.destroy(sandbox)
+
+          print("DIRECT_LIFECYCLE_PASS create ready env command write read list delete-accepted idempotent-delete")
+          PY
+
       - name: Run real SandboxToolset system test against Ascii Box
         shell: bash
         run: |
@@ -94,8 +148,9 @@ jobs:
           frames = []
           pages = [
               ("Apache Airflow #71725", ["Ascii Box live E2E", "GitHub Actions • exact current PR code"]),
-              ("Sandbox boundary", ["SandboxToolset ✓", "AsciiBoxSandboxBackend ✓", "Real Ascii Box API ✓"]),
-              ("Operations verified", ["create / ready ✓", "write_file ✓", "run_command ✓", "read_file ✓", "list_directory ✓", "destroy ✓"]),
+              ("Real sandbox lifecycle", ["create + ready ✓", "env + command ✓", "write + read + list ✓"]),
+              ("Teardown verified", ["delete request accepted ✓", "idempotent second delete ✓", "server TTL backstop configured ✓"]),
+              ("Agent boundary verified", ["SandboxToolset ✓", "AsciiBoxSandboxBackend ✓", "Real Ascii Box API ✓"]),
               ("LIVE E2E PASS", ["SDK-installed unit tests passed", "System test passed end-to-end", f"PR head: {os.environ['PR_HEAD'][:12]}"])
           ]
           for heading, lines in pages:
@@ -107,14 +162,14 @@ jobs:
               for line in lines:
                   d.text((85, y), line, font=body_font, fill="black")
                   y += 62
-              d.text((75, H-75), "Generated only after the live GitHub E2E step succeeded", font=small_font, fill="black")
+              d.text((75, H-75), "Generated only after both live E2E checks succeeded", font=small_font, fill="black")
               frames.append(img)
 
           frames[0].save(
               "proof/ascii-box-e2e.gif",
               save_all=True,
               append_images=frames[1:],
-              duration=[1400, 1600, 2200, 1800],
+              duration=[1300, 1900, 1900, 1700, 1900],
               loop=0,
               optimize=True,
           )
@@ -124,13 +179,17 @@ jobs:
               "pr_head": os.environ["PR_HEAD"],
               "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
               "verified": [
-                  "SandboxToolset agent flow",
-                  "AsciiBoxSandboxBackend create/ready",
-                  "write_file",
-                  "run_command",
-                  "read_file",
-                  "list_directory",
-                  "destroy",
+                  "SDK-installed unit suite",
+                  "system-test collection",
+                  "direct create and readiness",
+                  "explicit environment mapping",
+                  "direct command execution",
+                  "direct write_file",
+                  "direct read_file",
+                  "direct list_directory",
+                  "delete request accepted",
+                  "idempotent second delete",
+                  "SandboxToolset agent system test",
               ],
               "secret_exposed": False,
               "timestamp_utc": datetime.now(timezone.utc).isoformat(),
