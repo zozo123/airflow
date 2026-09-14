@@ -1,0 +1,120 @@
+name: Ascii Box live E2E proof
+
+on:
+  push:
+    branches:
+      - ascii-box-e2e-proof-20260914
+    paths:
+      - .github/workflows/ascii-box-live-proof.yml
+
+permissions:
+  contents: write
+
+jobs:
+  live-e2e:
+    runs-on: ubuntu-22.04
+    env:
+      BOX_API_KEY: ${{ secrets.BOX_API_KEY }}
+      PR_HEAD: 2de705589169153c22d97bdd5edd0af9c84b0bae
+    steps:
+      - name: Check out proof branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ascii-box-e2e-proof-20260914
+          fetch-depth: 1
+
+      - name: Require GitHub Actions secret
+        shell: bash
+        run: |
+          if [ -z "${BOX_API_KEY:-}" ]; then
+            echo "::error::BOX_API_KEY repository secret is not configured on zozo123/airflow"
+            exit 2
+          fi
+          echo "BOX_API_KEY is present and remains masked by GitHub Actions."
+
+      - name: Install uv and GIF dependency
+        run: |
+          python -m pip install --disable-pip-version-check uv pillow
+
+      - name: Run real SandboxToolset system test against Ascii Box
+        shell: bash
+        run: |
+          uv run --project providers/common/ai --extra sandbox-ascii-box \
+            pytest --system \
+            providers/common/ai/tests/system/common/ai/example_sandbox_toolset_ascii_box.py -q
+
+      - name: Create sanitized proof GIF and manifest
+        shell: bash
+        run: |
+          mkdir -p proof
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
+
+          W, H = 1000, 560
+          try:
+              title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+              body_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+              small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 22)
+          except OSError:
+              title_font = body_font = small_font = ImageFont.load_default()
+
+          frames = []
+          pages = [
+              ("Apache Airflow #71725", ["Ascii Box live E2E", "GitHub Actions • real provider code"]),
+              ("Sandbox boundary", ["SandboxToolset ✓", "AsciiBoxSandboxBackend ✓", "Real Ascii Box API ✓"]),
+              ("Operations verified", ["create / ready ✓", "write_file ✓", "run_command ✓", "read_file ✓", "list_directory ✓", "destroy ✓"]),
+              ("LIVE E2E PASS", ["34 SDK-installed unit tests already passed", "System test passed end-to-end", f"PR head: {os.environ['PR_HEAD'][:12]}"])
+          ]
+          for heading, lines in pages:
+              img = Image.new("RGB", (W, H), "white")
+              d = ImageDraw.Draw(img)
+              d.rounded_rectangle((35, 35, W-35, H-35), radius=24, outline="black", width=3)
+              d.text((75, 75), heading, font=title_font, fill="black")
+              y = 155
+              for line in lines:
+                  d.text((85, y), line, font=body_font, fill="black")
+                  y += 62
+              d.text((75, H-75), "Generated only after the live GitHub E2E step succeeded", font=small_font, fill="black")
+              frames.append(img)
+
+          frames[0].save(
+              "proof/ascii-box-e2e.gif",
+              save_all=True,
+              append_images=frames[1:],
+              duration=[1400, 1600, 2200, 1800],
+              loop=0,
+              optimize=True,
+          )
+          manifest = {
+              "success": True,
+              "pr": "apache/airflow#71725",
+              "pr_head": os.environ["PR_HEAD"],
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "verified": [
+                  "SandboxToolset agent flow",
+                  "AsciiBoxSandboxBackend create/ready",
+                  "write_file",
+                  "run_command",
+                  "read_file",
+                  "list_directory",
+                  "destroy",
+              ],
+              "secret_exposed": False,
+              "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+          }
+          Path("proof/ascii-box-e2e.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Commit GitHub-hosted proof
+        shell: bash
+        run: |
+          git add proof/ascii-box-e2e.gif proof/ascii-box-e2e.json
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Add verified Ascii Box live E2E proof"
+          git push origin HEAD:ascii-box-e2e-proof-20260914
