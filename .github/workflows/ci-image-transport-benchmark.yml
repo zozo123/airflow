@@ -119,83 +119,66 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-  consume:
-    name: "Consume ${{ matrix.variant }} #${{ matrix.replica }}"
+  consume-paired:
+    name: "Paired current vs zstd #${{ matrix.replica }}"
     needs: producer
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      max-parallel: 21
+      max-parallel: 8
       matrix:
-        variant: [current, gzip, zstd]
-        replica: [1, 2, 3, 4, 5, 6, 7]
+        replica: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       EXPECTED_IMAGE_ID: ${{ needs.producer.outputs.image-id }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Ensure decoder exists
-        if: matrix.variant == 'zstd'
+      - name: Paired restore/load benchmark
         shell: bash
-        run: |
-          if ! command -v zstd >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq zstd
-          fi
-
-      - name: Download artifact via stash-equivalent path
-        id: download
-        shell: bash
+        env:
+          REPLICA: ${{ matrix.replica }}
         run: |
           set -euo pipefail
           sudo mkdir -p /mnt/bench
           sudo chown "$(id -u):$(id -g)" /mnt/bench
-          start_ns="$(date +%s%N)"
-          gh run download "${GITHUB_RUN_ID}" \
-            --name "image-${{ matrix.variant }}" \
-            --dir /mnt/bench \
-            -R "${GITHUB_REPOSITORY}"
-          end_ns="$(date +%s%N)"
-          seconds="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
-          bytes="$(du -sb /mnt/bench | awk '{print $1}')"
-          echo "seconds=${seconds}" >> "${GITHUB_OUTPUT}"
-          echo "bytes=${bytes}" >> "${GITHUB_OUTPUT}"
-          printf 'BENCH_DOWNLOAD variant=%s replica=%s seconds=%s extracted_bytes=%s\n' \
-            "${{ matrix.variant }}" "${{ matrix.replica }}" "${seconds}" "${bytes}"
 
-      - name: Load Docker image
-        id: load
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${{ matrix.variant }}" in
-            current) archive=/mnt/bench/airflow-ci.raw.tar ;;
-            gzip) archive=/mnt/bench/airflow-ci.tar.gz ;;
-            zstd) archive=/mnt/bench/airflow-ci.tar.zst ;;
-          esac
-
-          start_ns="$(date +%s%N)"
-          docker image load -i "${archive}" >/tmp/docker-load.out
-          end_ns="$(date +%s%N)"
-          seconds="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
-          cat /tmp/docker-load.out
-          echo "seconds=${seconds}" >> "${GITHUB_OUTPUT}"
-          printf 'BENCH_LOAD variant=%s replica=%s seconds=%s\n' \
-            "${{ matrix.variant }}" "${{ matrix.replica }}" "${seconds}"
-
-      - name: Verify identical image and report
-        shell: bash
-        env:
-          DOWNLOAD_SECONDS: ${{ steps.download.outputs.seconds }}
-          LOAD_SECONDS: ${{ steps.load.outputs.seconds }}
-          EXTRACTED_BYTES: ${{ steps.download.outputs.bytes }}
-        run: |
-          set -euo pipefail
-          actual_id="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
-          if [[ "${actual_id}" != "${EXPECTED_IMAGE_ID}" ]]; then
-            echo "::error::Image ID mismatch: expected ${EXPECTED_IMAGE_ID}, got ${actual_id}"
-            exit 1
+          if (( REPLICA % 2 == 1 )); then
+            variants=(current zstd)
+          else
+            variants=(zstd current)
           fi
-          total="$(awk "BEGIN {printf \"%.3f\", ${DOWNLOAD_SECONDS}+${LOAD_SECONDS}}")"
-          printf 'BENCH_RESULT variant=%s replica=%s download_s=%s load_s=%s total_s=%s extracted_bytes=%s image_id=%s\n' \
-            "${{ matrix.variant }}" "${{ matrix.replica }}" "${DOWNLOAD_SECONDS}" "${LOAD_SECONDS}" \
-            "${total}" "${EXTRACTED_BYTES}" "${actual_id}"
+
+          for variant in "${variants[@]}"; do
+            rm -rf /mnt/bench/*
+            start_ns="$(date +%s%N)"
+            gh run download "${GITHUB_RUN_ID}" \
+              --name "image-${variant}" \
+              --dir /mnt/bench \
+              -R "${GITHUB_REPOSITORY}"
+            end_ns="$(date +%s%N)"
+            download_s="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
+
+            case "${variant}" in
+              current) archive=/mnt/bench/airflow-ci.raw.tar ;;
+              zstd) archive=/mnt/bench/airflow-ci.tar.zst ;;
+            esac
+
+            extracted_bytes="$(du -sb /mnt/bench | awk '{print $1}')"
+            start_ns="$(date +%s%N)"
+            docker image load -i "${archive}" >/tmp/docker-load.out
+            end_ns="$(date +%s%N)"
+            load_s="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
+
+            actual_id="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+            if [[ "${actual_id}" != "${EXPECTED_IMAGE_ID}" ]]; then
+              echo "::error::Image ID mismatch: expected ${EXPECTED_IMAGE_ID}, got ${actual_id}"
+              exit 1
+            fi
+
+            total_s="$(awk "BEGIN {printf \"%.3f\", ${download_s}+${load_s}}")"
+            printf 'PAIR_RESULT variant=%s replica=%s order=%s download_s=%s load_s=%s total_s=%s extracted_bytes=%s image_id=%s\n' \
+              "${variant}" "${REPLICA}" "${variants[*]}" "${download_s}" "${load_s}" "${total_s}" \
+              "${extracted_bytes}" "${actual_id}"
+
+            docker image rm -f "${IMAGE}" >/dev/null
+            docker system prune -af >/dev/null
+          done
