@@ -47,18 +47,85 @@ on:  # yamllint disable-line rule:truthy
 permissions:
   contents: read
 jobs:
+  prepare-helm-matrix:
+    name: "Prepare Helm test matrix"
+    runs-on: ["ubuntu-slim"]
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_work: ${{ steps.matrix.outputs.has_work }}
+    steps:
+      - name: "Build duration-balanced Helm test buckets"
+        id: matrix
+        env:
+          HELM_TEST_PACKAGES: ${{ inputs.helm-test-packages }}
+          HELM_TEST_KUBERNETES_VERSIONS: ${{ inputs.helm-test-kubernetes-versions }}
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+
+          packages = json.loads(os.environ["HELM_TEST_PACKAGES"])
+          kubernetes_versions = json.loads(os.environ["HELM_TEST_KUBERNETES_VERSIONS"])
+
+          # Relative timings from recent scheduled CI runs. They are only used to keep the
+          # buckets balanced; correctness never depends on the exact values. Unknown packages
+          # are treated as heavy so that a new test group is distributed conservatively.
+          weights = {
+              "airflow_aux": 367,
+              "airflow_core": 419,
+              "apiserver": 54,
+              "dagprocessor": 38,
+              "other": 214,
+              "otel_collector": 75,
+              "redis": 46,
+              "security": 140,
+              "statsd": 46,
+          }
+          unknown_weight = max(weights.values())
+          bucket_count = min(3, len(packages))
+          buckets = [
+              {"index": index, "weight": 0, "packages": []}
+              for index in range(bucket_count)
+          ]
+
+          for package in sorted(
+              packages,
+              key=lambda package: (-weights.get(package, unknown_weight), package),
+          ):
+              bucket = min(buckets, key=lambda item: (item["weight"], item["index"]))
+              bucket["packages"].append(package)
+              bucket["weight"] += weights.get(package, unknown_weight)
+
+          include = []
+          for kubernetes_version in kubernetes_versions:
+              for bucket in buckets:
+                  if not bucket["packages"]:
+                      continue
+                  include.append(
+                      {
+                          "kubernetes-version": kubernetes_version,
+                          "helm-test-packages": bucket["packages"],
+                          "bucket-label": ", ".join(bucket["packages"]),
+                      }
+                  )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"matrix={json.dumps({'include': include}, separators=(',', ':'))}\n")
+              output.write(f"has_work={'true' if include else 'false'}\n")
+
   tests-helm:
+    needs: [prepare-helm-matrix]
+    if: needs.prepare-helm-matrix.outputs.has_work == 'true'
     timeout-minutes: 80
     name: >-
-      Unit tests Helm: ${{ matrix.helm-test-package }}
+      Unit tests Helm: ${{ matrix.bucket-label }}
       (K8S ${{ matrix.kubernetes-version }})
     runs-on: ${{ fromJSON(inputs.runners) }}
     strategy:
       fail-fast: false
       max-parallel: 20
-      matrix:
-        helm-test-package: ${{ fromJSON(inputs.helm-test-packages) }}
-        kubernetes-version: ${{ fromJSON(inputs.helm-test-kubernetes-versions) }}
+      matrix: ${{ fromJSON(needs.prepare-helm-matrix.outputs.matrix) }}
     env:
       # Always use default Python version of CI image for preparing packages
       PYTHON_MAJOR_MINOR_VERSION: "${{ inputs.default-python-version }}"
@@ -86,14 +153,35 @@ jobs:
           python: "${{ inputs.default-python-version }}"
           use-uv: ${{ inputs.use-uv }}
           make-mnt-writeable-and-cleanup: true
-      - name: "Helm Unit Tests: ${{ matrix.helm-test-package }} (K8S ${{ matrix.kubernetes-version }})"
+      - name: "Helm Unit Tests: ${{ matrix.bucket-label }} (K8S ${{ matrix.kubernetes-version }})"
         env:
-          HELM_TEST_PACKAGE: "${{ matrix.helm-test-package }}"
+          HELM_TEST_PACKAGES: ${{ toJSON(matrix.helm-test-packages) }}
           HELM_TEST_KUBERNETES_VERSION: "${{ matrix.kubernetes-version }}"
-        run: >
-          breeze testing helm-tests
-          --test-type "${HELM_TEST_PACKAGE}"
-          --kubernetes-version "${HELM_TEST_KUBERNETES_VERSION}"
+        shell: bash
+        run: |
+          mapfile -t packages < <(jq -r '.[]' <<< "${HELM_TEST_PACKAGES}")
+          failed=()
+
+          for package in "${packages[@]}"; do
+            echo "::group::Helm Unit Tests: ${package} (K8S ${HELM_TEST_KUBERNETES_VERSION})"
+            if breeze testing helm-tests \
+                --test-type "${package}" \
+                --kubernetes-version "${HELM_TEST_KUBERNETES_VERSION}"; then
+              exit_code=0
+            else
+              exit_code=$?
+            fi
+            echo "::endgroup::"
+
+            if (( exit_code != 0 )); then
+              failed+=("${package} (${exit_code})")
+            fi
+          done
+
+          if (( ${#failed[@]} != 0 )); then
+            printf 'Failed Helm test groups: %s\n' "${failed[*]}"
+            exit 1
+          fi
 
   tests-helm-release:
     timeout-minutes: 80
