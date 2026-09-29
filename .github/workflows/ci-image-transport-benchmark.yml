@@ -1,0 +1,199 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+---
+name: CI image transport benchmark
+
+on:
+  push:
+    branches:
+      - ci/image-transport-benchmark
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  IMAGE: ghcr.io/apache/airflow/main/ci/python3.10:latest
+
+jobs:
+  producer:
+    name: Produce benchmark archives
+    runs-on: ubuntu-22.04
+    outputs:
+      image-id: ${{ steps.meta.outputs.image_id }}
+      raw-bytes: ${{ steps.archives.outputs.raw_bytes }}
+      gzip-bytes: ${{ steps.archives.outputs.gzip_bytes }}
+      zstd-bytes: ${{ steps.archives.outputs.zstd_bytes }}
+      gzip-seconds: ${{ steps.archives.outputs.gzip_seconds }}
+      zstd-seconds: ${{ steps.archives.outputs.zstd_seconds }}
+    steps:
+      - name: Pull exact Airflow CI image
+        run: docker pull "${IMAGE}"
+
+      - name: Record image identity
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+          echo "IMAGE_ID=${image_id}"
+
+      - name: Export and precompress variants
+        id: archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /mnt/bench
+          docker save -o /mnt/bench/airflow-ci.raw.tar "${IMAGE}"
+
+          start_ns="$(date +%s%N)"
+          pigz -1 -c /mnt/bench/airflow-ci.raw.tar > /mnt/bench/airflow-ci.tar.gz
+          end_ns="$(date +%s%N)"
+          gzip_seconds="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
+
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zstd
+          fi
+          start_ns="$(date +%s%N)"
+          zstd -1 -T0 -q -c /mnt/bench/airflow-ci.raw.tar > /mnt/bench/airflow-ci.tar.zst
+          end_ns="$(date +%s%N)"
+          zstd_seconds="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
+
+          raw_bytes="$(stat -c %s /mnt/bench/airflow-ci.raw.tar)"
+          gzip_bytes="$(stat -c %s /mnt/bench/airflow-ci.tar.gz)"
+          zstd_bytes="$(stat -c %s /mnt/bench/airflow-ci.tar.zst)"
+
+          {
+            echo "raw_bytes=${raw_bytes}"
+            echo "gzip_bytes=${gzip_bytes}"
+            echo "zstd_bytes=${zstd_bytes}"
+            echo "gzip_seconds=${gzip_seconds}"
+            echo "zstd_seconds=${zstd_seconds}"
+          } >> "${GITHUB_OUTPUT}"
+
+          printf 'raw_bytes=%s\ngzip_bytes=%s\nzstd_bytes=%s\ngzip_seconds=%s\nzstd_seconds=%s\n' \
+            "${raw_bytes}" "${gzip_bytes}" "${zstd_bytes}" "${gzip_seconds}" "${zstd_seconds}"
+
+      # This mirrors today's stash behavior: upload a raw docker-save tar and let
+      # upload-artifact apply its default zlib level 6.
+      - name: Upload current raw-tar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-current
+          path: /mnt/bench/airflow-ci.raw.tar
+          compression-level: 6
+          retention-days: 1
+
+      # Precompressed inputs should not be compressed a second time by artifact storage.
+      - name: Upload gzip-fast artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-gzip
+          path: /mnt/bench/airflow-ci.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload zstd-fast artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-zstd
+          path: /mnt/bench/airflow-ci.tar.zst
+          compression-level: 0
+          retention-days: 1
+
+  consume:
+    name: "Consume ${{ matrix.variant }} #${{ matrix.replica }}"
+    needs: producer
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 21
+      matrix:
+        variant: [current, gzip, zstd]
+        replica: [1, 2, 3, 4, 5, 6, 7]
+    env:
+      EXPECTED_IMAGE_ID: ${{ needs.producer.outputs.image-id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Ensure decoder exists
+        if: matrix.variant == 'zstd'
+        shell: bash
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zstd
+          fi
+
+      - name: Download artifact via stash-equivalent path
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /mnt/bench
+          start_ns="$(date +%s%N)"
+          gh run download "${GITHUB_RUN_ID}" \
+            --name "image-${{ matrix.variant }}" \
+            --dir /mnt/bench \
+            -R "${GITHUB_REPOSITORY}"
+          end_ns="$(date +%s%N)"
+          seconds="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
+          bytes="$(du -sb /mnt/bench | awk '{print $1}')"
+          echo "seconds=${seconds}" >> "${GITHUB_OUTPUT}"
+          echo "bytes=${bytes}" >> "${GITHUB_OUTPUT}"
+          printf 'BENCH_DOWNLOAD variant=%s replica=%s seconds=%s extracted_bytes=%s\n' \
+            "${{ matrix.variant }}" "${{ matrix.replica }}" "${seconds}" "${bytes}"
+
+      - name: Load Docker image
+        id: load
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.variant }}" in
+            current) archive=/mnt/bench/airflow-ci.raw.tar ;;
+            gzip) archive=/mnt/bench/airflow-ci.tar.gz ;;
+            zstd) archive=/mnt/bench/airflow-ci.tar.zst ;;
+          esac
+
+          start_ns="$(date +%s%N)"
+          docker image load -i "${archive}" >/tmp/docker-load.out
+          end_ns="$(date +%s%N)"
+          seconds="$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")"
+          cat /tmp/docker-load.out
+          echo "seconds=${seconds}" >> "${GITHUB_OUTPUT}"
+          printf 'BENCH_LOAD variant=%s replica=%s seconds=%s\n' \
+            "${{ matrix.variant }}" "${{ matrix.replica }}" "${seconds}"
+
+      - name: Verify identical image and report
+        shell: bash
+        env:
+          DOWNLOAD_SECONDS: ${{ steps.download.outputs.seconds }}
+          LOAD_SECONDS: ${{ steps.load.outputs.seconds }}
+          EXTRACTED_BYTES: ${{ steps.download.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          actual_id="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+          if [[ "${actual_id}" != "${EXPECTED_IMAGE_ID}" ]]; then
+            echo "::error::Image ID mismatch: expected ${EXPECTED_IMAGE_ID}, got ${actual_id}"
+            exit 1
+          fi
+          total="$(awk "BEGIN {printf \"%.3f\", ${DOWNLOAD_SECONDS}+${LOAD_SECONDS}}")"
+          printf 'BENCH_RESULT variant=%s replica=%s download_s=%s load_s=%s total_s=%s extracted_bytes=%s image_id=%s\n' \
+            "${{ matrix.variant }}" "${{ matrix.replica }}" "${DOWNLOAD_SECONDS}" "${LOAD_SECONDS}" \
+            "${total}" "${EXTRACTED_BYTES}" "${actual_id}"
