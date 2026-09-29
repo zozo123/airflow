@@ -104,9 +104,9 @@ jobs:
                       continue
                   include.append(
                       {
-                          "kubernetes-version": kubernetes_version,
-                          "helm-test-packages": bucket["packages"],
-                          "bucket-label": ", ".join(bucket["packages"]),
+                          "kubernetes_version": kubernetes_version,
+                          "helm_test_packages": bucket["packages"],
+                          "bucket_label": ", ".join(bucket["packages"]),
                       }
                   )
 
@@ -119,8 +119,8 @@ jobs:
     if: needs.prepare-helm-matrix.outputs.has_work == 'true'
     timeout-minutes: 80
     name: >-
-      Unit tests Helm: ${{ matrix.bucket-label }}
-      (K8S ${{ matrix.kubernetes-version }})
+      Unit tests Helm: ${{ matrix.bucket_label }}
+      (K8S ${{ matrix.kubernetes_version }})
     runs-on: ${{ fromJSON(inputs.runners) }}
     strategy:
       fail-fast: false
@@ -153,10 +153,10 @@ jobs:
           python: "${{ inputs.default-python-version }}"
           use-uv: ${{ inputs.use-uv }}
           make-mnt-writeable-and-cleanup: true
-      - name: "Helm Unit Tests: ${{ matrix.bucket-label }} (K8S ${{ matrix.kubernetes-version }})"
+      - name: "Helm Unit Tests: ${{ matrix.bucket_label }} (K8S ${{ matrix.kubernetes_version }})"
         env:
-          HELM_TEST_PACKAGES: ${{ toJSON(matrix.helm-test-packages) }}
-          HELM_TEST_KUBERNETES_VERSION: "${{ matrix.kubernetes-version }}"
+          HELM_TEST_PACKAGES: ${{ toJSON(matrix.helm_test_packages) }}
+          HELM_TEST_KUBERNETES_VERSION: "${{ matrix.kubernetes_version }}"
         shell: bash
         run: |
           mapfile -t packages < <(jq -r '.[]' <<< "${HELM_TEST_PACKAGES}")
