@@ -59,7 +59,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /mnt/bench
+          sudo mkdir -p /mnt/bench
+          sudo chown "$(id -u):$(id -g)" /mnt/bench
           docker save -o /mnt/bench/airflow-ci.raw.tar "${IMAGE}"
 
           start_ns="$(date +%s%N)"
@@ -146,7 +147,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /mnt/bench
+          sudo mkdir -p /mnt/bench
+          sudo chown "$(id -u):$(id -g)" /mnt/bench
           start_ns="$(date +%s%N)"
           gh run download "${GITHUB_RUN_ID}" \
             --name "image-${{ matrix.variant }}" \
