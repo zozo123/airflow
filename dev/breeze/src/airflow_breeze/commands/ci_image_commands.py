@@ -20,6 +20,7 @@ import contextlib
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -230,10 +231,11 @@ option_ci_image_file_to_load = click.option(
     required=False,
     type=click.Path(dir_okay=False, readable=True, path_type=Path, resolve_path=True),
     envvar="IMAGE_FILE",
-    help="Optional file name to load the image from - name must follow the convention:"
-    "`ci-image-save-v3-{escaped_platform}-*-{python_version}.tar`. where escaped_platform is one of "
+    help="Optional file name to load the image from. Supported conventions are "
+    "`ci-image-save-v3-{escaped_platform}-*-{python_version}.tar` and "
+    "`ci-image-save-v4-{escaped_platform}-*-{python_version}.tar.zst`, where escaped_platform is "
     "linux_amd64 or linux_arm64. If it does not exist in current working dir and if you do not specify "
-    "absolute file, it will be searched for in the --image-file-dir.",
+    "an absolute file, it will be searched for in the --image-file-dir.",
 )
 
 
@@ -514,6 +516,50 @@ def run_verify_in_parallel(
     )
 
 
+def _ci_image_archive_paths(image_file_dir: Path, escaped_platform: str, python: str) -> tuple[Path, Path]:
+    """Return the current compressed archive path and the legacy uncompressed path."""
+    return (
+        image_file_dir / f"ci-image-save-v4-{escaped_platform}-{python}.tar.zst",
+        image_file_dir / f"ci-image-save-v3-{escaped_platform}-{python}.tar",
+    )
+
+
+def _save_ci_image_archive(image_name: str, image_file_to_store: Path) -> None:
+    """Save a CI image, streaming through zstd when a .tar.zst path is requested."""
+    if image_file_to_store.name.endswith(".tar.zst"):
+        if not shutil.which("zstd"):
+            console_print("[error]zstd is required to save a compressed CI image archive.[/]")
+            sys.exit(1)
+        image_file_to_store.unlink(missing_ok=True)
+        console_print(f"[info]Saving Python CI image {image_name} to {image_file_to_store} with zstd[/]")
+        with subprocess.Popen(["docker", "image", "save", image_name], stdout=subprocess.PIPE) as docker_save:
+            assert docker_save.stdout is not None
+            zstd_result = subprocess.run(
+                ["zstd", "-1", "-T0", "-q", "-o", image_file_to_store.as_posix()],
+                stdin=docker_save.stdout,
+                check=False,
+            )
+            docker_save.stdout.close()
+            docker_returncode = docker_save.wait()
+        if docker_returncode != 0 or zstd_result.returncode != 0:
+            image_file_to_store.unlink(missing_ok=True)
+            returncode = docker_returncode or zstd_result.returncode
+            console_print(
+                f"[error]Error when saving compressed image: docker={docker_returncode}, "
+                f"zstd={zstd_result.returncode}[/]"
+            )
+            sys.exit(returncode)
+        return
+
+    console_print(f"[info]Saving Python CI image {image_name} to {image_file_to_store}[/]")
+    result = run_command(
+        ["docker", "image", "save", "-o", image_file_to_store.as_posix(), image_name], check=False
+    )
+    if result.returncode != 0:
+        console_print(f"[error]Error when saving image: {result.stdout}[/]")
+        sys.exit(result.returncode)
+
+
 @ci_image_group.command(name="save")
 @option_ci_image_file_to_save
 @option_github_repository
@@ -538,19 +584,14 @@ def save(
     with ci_group("Buildx disk usage"):
         run_command(["docker", "buildx", "du", "--verbose"], check=False)
     escaped_platform = platform.replace("/", "_")
+    _, legacy_image_file = _ci_image_archive_paths(image_file_dir, escaped_platform, python)
     if not image_file:
-        image_file_to_store = image_file_dir / f"ci-image-save-v3-{escaped_platform}-{python}.tar"
+        image_file_to_store = legacy_image_file
     elif image_file.is_absolute():
         image_file_to_store = image_file
     else:
         image_file_to_store = image_file_dir / image_file
-    console_print(f"[info]Saving Python CI image {image_name} to {image_file_to_store}[/]")
-    result = run_command(
-        ["docker", "image", "save", "-o", image_file_to_store.as_posix(), image_name], check=False
-    )
-    if result.returncode != 0:
-        console_print(f"[error]Error when saving image: {result.stdout}[/]")
-        sys.exit(result.returncode)
+    _save_ci_image_archive(image_name, image_file_to_store)
 
 
 @ci_image_group.command(name="load")
@@ -585,23 +626,28 @@ def load(
         github_repository=github_repository,
     )
     escaped_platform = platform.replace("/", "_")
+    current_image_file, legacy_image_file = _ci_image_archive_paths(image_file_dir, escaped_platform, python)
 
     if not image_file:
-        image_file_to_load = image_file_dir / f"ci-image-save-v3-{escaped_platform}-{python}.tar"
+        if from_run or from_pr:
+            image_file_to_load = current_image_file
+        else:
+            image_file_to_load = current_image_file if current_image_file.exists() else legacy_image_file
     elif image_file.is_absolute() or image_file.exists():
         image_file_to_load = image_file
     else:
         image_file_to_load = image_file_dir / image_file
 
-    if not image_file_to_load.name.endswith(f"-{python}.tar"):
+    is_legacy_archive = image_file_to_load.name.startswith(
+        f"ci-image-save-v3-{escaped_platform}"
+    ) and image_file_to_load.name.endswith(f"-{python}.tar")
+    is_current_archive = image_file_to_load.name.startswith(
+        f"ci-image-save-v4-{escaped_platform}"
+    ) and image_file_to_load.name.endswith(f"-{python}.tar.zst")
+    if not (is_legacy_archive or is_current_archive):
         console_print(
-            f"[error]The image file {image_file_to_load} does not end with '-{python}.tar'. Exiting.[/]"
-        )
-        sys.exit(1)
-    if not image_file_to_load.name.startswith(f"ci-image-save-v3-{escaped_platform}"):
-        console_print(
-            f"[error]The image file {image_file_to_load} does not start with "
-            f"'ci-image-save-v3-{escaped_platform}'. Exiting.[/]"
+            f"[error]The image file {image_file_to_load} does not match a supported CI image archive "
+            f"for {escaped_platform} and Python {python}. Exiting.[/]"
         )
         sys.exit(1)
 
