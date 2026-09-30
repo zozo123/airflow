@@ -170,7 +170,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: apache/infrastructure-actions/stash/restore@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # restore/v1.0.0
         with:
-          key: "ci-image-commit-v3-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
+          key: "ci-image-commit-v4-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
             -${{ inputs.image-stash-ref }}"
           path: "/mnt/"
           only-current-branch: 'true'
@@ -204,7 +204,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: apache/infrastructure-actions/stash/restore@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # restore/v1.0.0
         with:
-          key: "ci-image-save-v3-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
+          key: "ci-image-save-v4-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
             -${{ inputs.image-stash-ref }}"
           path: "/mnt/"
           only-current-branch: 'true'
@@ -248,7 +248,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: apache/infrastructure-actions/stash/restore@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # restore/v1.0.0
         with:
-          key: "ci-image-save-v3-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}"
+          key: "ci-image-save-v4-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}"
           path: "/mnt/"
           only-current-branch: 'true'
         id: restore-cache-image
@@ -326,16 +326,23 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           COMMIT_FILE: "/mnt/ci-image-commit-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.txt"
         run: |
-          breeze ci-image save --platform "${PLATFORM}" --image-file-dir "/mnt"
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zstd
+          fi
+          escaped_platform="${PLATFORM//\//_}"
+          image_file="/mnt/ci-image-save-v4-${escaped_platform}-${PYTHON_MAJOR_MINOR_VERSION}.tar.zst"
+          breeze ci-image save --platform "${PLATFORM}" --image-file "${image_file}"
           git rev-parse HEAD > "${COMMIT_FILE}"
         shell: bash
         if: inputs.upload-image-artifact == 'true' && steps.stashed-image.outputs.reusable != 'true'
       - name: "Stash CI docker image ${{ env.PYTHON_MAJOR_MINOR_VERSION }}"
         uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
         with:
-          key: ci-image-save-v3-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}
-          path: "/mnt/ci-image-save-*-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.tar"
+          key: ci-image-save-v4-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}
+          path: "/mnt/ci-image-save-*-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.tar.zst"
           if-no-files-found: 'error'
+          compression-level: '0'
           retention-days: '2'
         if: inputs.upload-image-artifact == 'true' && inputs.image-stash-ref == ''
       # The per-branch stash above is written by every build on this branch, so an image built
@@ -346,10 +353,11 @@ jobs:
       - name: "Stash CI docker image built for ref ${{ inputs.image-stash-ref }}"
         uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
         with:
-          key: "ci-image-save-v3-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
+          key: "ci-image-save-v4-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
             -${{ inputs.image-stash-ref }}"
-          path: "/mnt/ci-image-save-*-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.tar"
+          path: "/mnt/ci-image-save-*-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.tar.zst"
           if-no-files-found: 'error'
+          compression-level: '0'
           retention-days: '6'
         if: >
           inputs.upload-image-artifact == 'true' && inputs.image-stash-ref != '' &&
@@ -359,7 +367,7 @@ jobs:
       - name: "Stash the commit the CI image for ref ${{ inputs.image-stash-ref }} was built from"
         uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
         with:
-          key: "ci-image-commit-v3-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
+          key: "ci-image-commit-v4-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}\
             -${{ inputs.image-stash-ref }}"
           path: "/mnt/ci-image-commit-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.txt"
           if-no-files-found: 'error'
