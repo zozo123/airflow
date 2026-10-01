@@ -1,0 +1,201 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Throwaway end-to-end eval of the zstd CI image stash: real patched producer
+# (ci-image-build.yml) and real unchanged consumers (prepare_breeze_and_image).
+---
+name: "zstd minimal eval"
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: ["bench/zstd-minimal-eval"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build-amd:
+    name: "Build amd64"
+    uses: ./.github/workflows/ci-image-build.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      runners: '["ubuntu-22.04"]'
+      platform: "linux/amd64"
+      push-image: "false"
+      upload-image-artifact: "true"
+      upload-mount-cache-artifact: "false"
+      python-versions: '["3.10"]'
+      branch: "main"
+      constraints-branch: "constraints-main"
+      use-uv: "true"
+      upgrade-to-newer-dependencies: "false"
+      docker-cache: "registry"
+      disable-airflow-repo-cache: "false"
+
+  build-arm:
+    name: "Build arm64"
+    uses: ./.github/workflows/ci-image-build.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      runners: '["ubuntu-22.04-arm"]'
+      platform: "linux/arm64"
+      push-image: "false"
+      upload-image-artifact: "true"
+      upload-mount-cache-artifact: "false"
+      python-versions: '["3.10"]'
+      branch: "main"
+      constraints-branch: "constraints-main"
+      use-uv: "true"
+      upgrade-to-newer-dependencies: "false"
+      docker-cache: "registry"
+      disable-airflow-repo-cache: "false"
+
+  # Restores the stash directly (same pinned action as the consumers) to inspect the raw
+  # stashed file before Breeze loads and deletes it.
+  stash-check:
+    name: "Stash check ${{ matrix.arch }}"
+    needs: [build-amd, build-arm]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Make /mnt writeable"
+        run: ./scripts/ci/make_mnt_writeable.sh
+      - name: "Restore stash"
+        # yamllint disable-line rule:line-length
+        uses: apache/infrastructure-actions/stash/restore@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # restore/v1.0.0
+        with:
+          key: "ci-image-save-v3-linux/${{ matrix.arch }}-3.10"
+          path: "/mnt/"
+          only-current-branch: 'true'
+          fail-on-download: 'true'
+      - name: "Inspect stashed file"
+        env:
+          F: "/mnt/ci-image-save-v3-linux_${{ matrix.arch }}-3.10.tar"
+        run: |
+          set -euo pipefail
+          ls -l /mnt/
+          stat -c 'EVAL_FILE_BYTES=%s' "${F}"
+          echo "EVAL_MAGIC=$(head -c4 "${F}" | xxd -p)"
+          head -c4 "${F}" | xxd
+          file "${F}"
+          zstd -lv "${F}" || true
+          [[ "$(head -c4 "${F}" | xxd -p)" == "28b52ffd" ]] || { echo "NOT ZSTD"; exit 1; }
+          start=$(date +%s%N)
+          zstd -dc "${F}" | tar -xO manifest.json > /tmp/manifest.json
+          echo "EVAL_DECOMPRESS_MS=$(( ($(date +%s%N) - start) / 1000000 ))"
+          cat /tmp/manifest.json; echo
+          echo "EVAL_PRODUCER_CONFIG=$(python3 -c 'import json;print(json.load(open("/tmp/manifest.json"))[0]["Config"])')"
+
+  consumer:
+    name: "Consumer ${{ matrix.arch }} ${{ matrix.n }}"
+    needs: [build-amd, build-arm]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        n: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    steps:
+      - name: "Cleanup repo"
+        shell: bash
+        run: sudo rm -rf ${GITHUB_WORKSPACE}/*
+      - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Make /mnt writeable"
+        run: ./scripts/ci/make_mnt_writeable.sh
+      - name: "Move docker to /mnt"
+        run: ./scripts/ci/move_docker_to_mnt.sh
+      - name: "Prepare breeze & CI image: 3.10"
+        uses: ./.github/actions/prepare_breeze_and_image
+        with:
+          platform: "linux/${{ matrix.arch }}"
+          python: "3.10"
+          use-uv: "true"
+          make-mnt-writeable-and-cleanup: false
+      - name: "Verify image"
+        run: |
+          set -euo pipefail
+          docker images --no-trunc
+          IMAGE=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '/ci/python3.10:' | head -1)
+          echo "EVAL_IMAGE=${IMAGE}"
+          echo "EVAL_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+          echo "EVAL_IMAGE_ARCH=$(docker image inspect --format '{{.Architecture}}' "${IMAGE}")"
+          docker run --rm --entrypoint python "${IMAGE}" -c \
+            "import airflow, sys, platform; print('EVAL_RUN_OK', airflow.__version__, platform.machine(), sys.version)"
+
+  # v3-3-test's own actions and Breeze (old release branch, only knows ci-image-save-v3-*.tar).
+  consumer-v3-3-test:
+    name: "Consumer v3-3-test amd64 ${{ matrix.n }}"
+    needs: [build-amd]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "Cleanup repo"
+        shell: bash
+        run: sudo rm -rf ${GITHUB_WORKSPACE}/*
+      - name: "Checkout apache/airflow v3-3-test"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/airflow
+          ref: v3-3-test
+          persist-credentials: false
+      - name: "Show checked out ref"
+        run: |
+          git log -1 --format='EVAL_V33_SHA=%H %s'
+          grep -n "stash/restore" .github/actions/prepare_breeze_and_image/action.yml
+      - name: "Make /mnt writeable"
+        run: ./scripts/ci/make_mnt_writeable.sh
+      - name: "Move docker to /mnt"
+        run: ./scripts/ci/move_docker_to_mnt.sh
+      - name: "Prepare breeze & CI image (v3-3-test action): 3.10"
+        uses: ./.github/actions/prepare_breeze_and_image
+        with:
+          platform: "linux/amd64"
+          python: "3.10"
+          use-uv: "true"
+          make-mnt-writeable-and-cleanup: false
+      - name: "Verify image"
+        run: |
+          set -euo pipefail
+          breeze version || true
+          docker images --no-trunc
+          IMAGE=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '/ci/python3.10:' | head -1)
+          echo "EVAL_IMAGE=${IMAGE}"
+          echo "EVAL_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+          docker run --rm --entrypoint python "${IMAGE}" -c \
+            "import airflow, sys, platform; print('EVAL_RUN_OK', airflow.__version__, platform.machine(), sys.version)"
