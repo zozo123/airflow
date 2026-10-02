@@ -24,7 +24,7 @@ PY
 run() {
   local label=$1 s e
   s=$(date +%s.%N)
-  breeze testing core-tests --backend "$BACKEND" --db-reset --skip-db-tests=false "$MODULE" > /tmp/run.log 2>&1 || true
+  breeze testing core-tests --backend "$BACKEND" --db-reset "$MODULE" > /tmp/run.log 2>&1 || true
   e=$(date +%s.%N)
   summary=$(sed -E 's/\x1b\[[0-9;]*m//g' /tmp/run.log | grep -oE "[0-9]+ passed.* in [0-9.]+s" | tail -1)
   echo "$label wall=$(awk -v a=$s -v b=$e 'BEGIN{printf "%.1f", b-a}')s pytest: ${summary:-?}"
