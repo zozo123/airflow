@@ -57,7 +57,8 @@ jobs:
           PLATFORM: linux/amd64
         run: |
           s=$SECONDS
-          ./scripts/ci/docker_data_root_snapshot.sh create "/mnt/ci-image-snapshot-${PLATFORM//\//_}-${PYTHON_MAJOR_MINOR_VERSION}.tar.zst"
+          sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+          PS4='+ $(date +%T.%N | cut -c1-12) ' bash -x ./scripts/ci/docker_data_root_snapshot.sh create "/mnt/ci-image-snapshot-${PLATFORM//\//_}-${PYTHON_MAJOR_MINOR_VERSION}.tar.zst" 2>&1 | grep -E "^\+ [0-9:.]+ (docker|sudo|printf|zstd)" | cut -c1-120
           echo "snapshot took $((SECONDS - s))s"; ls -l /mnt/ci-image-snapshot-*; cat /mnt/ci-image-snapshot-*.meta
           docker images
       - name: "Stash CI image snapshot (the new step)"
@@ -100,5 +101,6 @@ jobs:
           MOUNT_SOURCES: "skip"
         run: |
           s=$SECONDS
-          breeze testing core-tests --backend sqlite --db-reset airflow-core/tests/unit/utils/test_helpers.py airflow-core/tests/unit/models/test_dagrun.py 2>&1 | tail -5
+          set -o pipefail
+          breeze testing core-tests --backend sqlite --db-reset airflow-core/tests/unit/utils/test_helpers.py airflow-core/tests/unit/models/test_dagrun.py 2>&1 | grep -E "[0-9]+ (passed|failed)|ERROR|error:" | tail -5
           echo "tests took $((SECONDS - s))s"
