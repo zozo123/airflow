@@ -1,0 +1,40 @@
+---
+name: "Bench container overhead"
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: [bench/container-overhead]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bench:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Time each breeze ci free-space sub-command on a fresh runner"
+        run: |
+          tm() { local s; s=$(date +%s.%N); "$@" >/dev/null 2>&1; echo "$(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s  $*"; }
+          free -m | head -3; swapon --show || true
+          tm sudo swapoff -a
+          tm sudo rm -f /swapfile
+          tm sudo apt-get clean
+          tm docker system prune --all --force --volumes
+          tm docker logout ghcr.io
+          tm pip uninstall apache-airflow --yes
+          docker images | head
+          df -h /
+      - name: "Time breeze install and breeze ci free-space as a whole"
+        run: |
+          s=$(date +%s.%N); ./scripts/ci/install_breeze.sh >/dev/null 2>&1; echo "install_breeze $(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s"
+          s=$(date +%s.%N); breeze --help >/dev/null 2>&1; echo "breeze --help $(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s"
+          s=$(date +%s.%N); breeze ci free-space --answer yes >/dev/null 2>&1; echo "breeze ci free-space (already clean) $(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s"
+      - name: "Pull the CI image"
+        run: time docker pull -q ghcr.io/apache/airflow/main/ci/python3.10:latest
+      - name: "Per-container fixed costs"
+        env:
+          RUNS: "3"
+          PROVIDER: "amazon"
+        run: bash .github/bench/container_overhead_bench.sh
