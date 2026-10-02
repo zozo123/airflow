@@ -399,5 +399,29 @@ jobs:
         if: >
           inputs.upload-mount-cache-artifact == 'true' &&
           steps.stashed-image.outputs.reusable != 'true'
+      # Every job that prepares the CI image would otherwise `docker image load` the stash above,
+      # unpacking and checksumming each layer again; a copy of the image store restores with one
+      # extraction. Taken last, as it drops the build cache that the mount cache export reads.
+      - name: "Snapshot CI image ${{ inputs.platform }}:${{ env.PYTHON_MAJOR_MINOR_VERSION }}"
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: >
+          ./scripts/ci/docker_data_root_snapshot.sh create
+          "/mnt/ci-image-snapshot-${PLATFORM//\//_}-${PYTHON_MAJOR_MINOR_VERSION}.tar.zst"
+        shell: bash
+        if: >
+          inputs.upload-image-artifact == 'true' && inputs.image-stash-ref == '' &&
+          steps.stashed-image.outputs.reusable != 'true'
+      - name: "Stash CI image snapshot ${{ inputs.platform }}:${{ env.PYTHON_MAJOR_MINOR_VERSION }}"
+        uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
+        with:
+          key: ci-image-snapshot-v1-${{ inputs.platform }}-${{ env.PYTHON_MAJOR_MINOR_VERSION }}
+          path: "/mnt/ci-image-snapshot-*-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.tar.zst*"
+          if-no-files-found: 'error'
+          compression-level: '0'
+          retention-days: '2'
+        if: >
+          inputs.upload-image-artifact == 'true' && inputs.image-stash-ref == '' &&
+          steps.stashed-image.outputs.reusable != 'true'
       - name: "Check disk space after build"
         run: df -H
