@@ -31,14 +31,12 @@ jobs:
         run: |
           pip install -q "uv==$(sed -n '/^name = "uv"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock)"
           s=$(date +%s.%N); ./scripts/ci/install_breeze.sh >/dev/null 2>&1; echo "install_breeze $(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s"
+          export PATH="$HOME/.local/bin:$PATH"; command -v breeze
           s=$(date +%s.%N); breeze --help >/dev/null 2>&1; echo "breeze --help $(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s"
           s=$(date +%s.%N); breeze ci free-space --answer yes >/dev/null 2>&1; echo "breeze ci free-space (already clean) $(awk -v a=$s -v b=$(date +%s.%N) 'BEGIN{printf "%.2f", b-a}')s"
       - name: "Pull the CI image"
         continue-on-error: true
         run: time docker pull -q ghcr.io/apache/airflow/main/ci/python3.10:latest
-      - name: "Per-container fixed costs"
+      - name: "Round 2: shared pycache, lowest-deps uv cache, save|zstd"
         continue-on-error: true
-        env:
-          RUNS: "3"
-          PROVIDER: "amazon"
-        run: bash .github/bench/container_overhead_bench.sh
+        run: bash .github/bench/round2.sh
