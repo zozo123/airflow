@@ -42,6 +42,16 @@ jobs:
           if-no-files-found: 'error'
           compression-level: '0'
           retention-days: '1'
+      - name: "Same image as a 3.11 stash with no snapshot behind it (for the fallback consumer)"
+        run: cp /mnt/ci-image-save-v3-linux_amd64-3.10.tar /mnt/ci-image-save-v3-linux_amd64-3.11.tar
+      - name: "Stash the 3.11 copy"
+        uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
+        with:
+          key: ci-image-save-v3-linux/amd64-3.11
+          path: "/mnt/ci-image-save-v3-linux_amd64-3.11.tar"
+          if-no-files-found: 'error'
+          compression-level: '0'
+          retention-days: '1'
       - name: "Snapshot CI image (the new step)"
         env:
           PLATFORM: linux/amd64
@@ -72,23 +82,12 @@ jobs:
           persist-credentials: false
       - name: "Make /mnt writeable and move docker there"
         run: ./scripts/ci/make_mnt_writeable.sh && ./scripts/ci/move_docker_to_mnt.sh
-      - name: "Force the fallback: give the daemon an image the snapshot would drop"
-        if: matrix.path == 'fallback'
-        run: |
-          # free-space in the breeze action prunes images, so add one after it via a wrapper step below
-          echo "FORCE_FALLBACK=true" >> "$GITHUB_ENV"
-      - name: "Install Breeze (for the fallback case, to seed an image after its cleanup)"
-        if: matrix.path == 'fallback'
-        uses: ./.github/actions/breeze
-      - name: "Seed an unrelated image"
-        if: matrix.path == 'fallback'
-        run: docker pull -q hello-world
       - name: "Prepare breeze & CI image (modified action)"
         id: prepare
         uses: ./.github/actions/prepare_breeze_and_image
         with:
           platform: linux/amd64
-          python: "3.10"
+          python: ${{ matrix.path == 'snapshot' && '3.10' || '3.11' }}
           use-uv: "true"
           make-mnt-writeable-and-cleanup: "false"
       - name: "Which path was taken"
