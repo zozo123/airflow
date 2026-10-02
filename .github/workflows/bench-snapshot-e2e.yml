@@ -1,0 +1,105 @@
+---
+name: "Bench CI image snapshot end-to-end"
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: [bench/snapshot-e2e]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  PYTHON_MAJOR_MINOR_VERSION: "3.10"
+  GITHUB_REPOSITORY: ${{ github.repository }}
+jobs:
+  produce:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Make /mnt writeable and move docker there"
+        run: ./scripts/ci/make_mnt_writeable.sh && ./scripts/ci/move_docker_to_mnt.sh
+      - name: "Install Breeze"
+        uses: ./.github/actions/breeze
+      - name: "Stand in for the build: the published CI image under this repository's name"
+        run: |
+          docker pull -q ghcr.io/apache/airflow/main/ci/python3.10:latest
+          docker tag ghcr.io/apache/airflow/main/ci/python3.10:latest "ghcr.io/${GITHUB_REPOSITORY,,}/main/ci/python3.10:latest"
+          docker rmi ghcr.io/apache/airflow/main/ci/python3.10:latest
+          docker pull -q hello-world   # an unrelated image the snapshot must leave out
+      - name: "Export CI docker image (as ci-image-build.yml does)"
+        run: |
+          s=$SECONDS
+          breeze ci-image save --platform linux/amd64 --image-file-dir /mnt
+          for f in /mnt/ci-image-save-*-3.10.tar; do zstd -6 -T0 --rm -o "$f.zst" "$f"; mv "$f.zst" "$f"; done
+          echo "export took $((SECONDS - s))s"
+      - name: "Stash CI docker image"
+        uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
+        with:
+          key: ci-image-save-v3-linux/amd64-3.10
+          path: "/mnt/ci-image-save-*-3.10.tar"
+          if-no-files-found: 'error'
+          compression-level: '0'
+          retention-days: '1'
+      - name: "Snapshot CI image (the new step)"
+        env:
+          PLATFORM: linux/amd64
+        run: |
+          s=$SECONDS
+          ./scripts/ci/docker_data_root_snapshot.sh create "/mnt/ci-image-snapshot-${PLATFORM//\//_}-${PYTHON_MAJOR_MINOR_VERSION}.tar.zst"
+          echo "snapshot took $((SECONDS - s))s"; ls -l /mnt/ci-image-snapshot-*; cat /mnt/ci-image-snapshot-*.meta
+          docker images
+      - name: "Stash CI image snapshot (the new step)"
+        uses: apache/infrastructure-actions/stash/save@61dcea11f19e2bbe1263f14d72235e8da17d3ad0  # save/v1.0.0
+        with:
+          key: ci-image-snapshot-v1-linux/amd64-3.10
+          path: "/mnt/ci-image-snapshot-*-3.10.tar.zst*"
+          if-no-files-found: 'error'
+          compression-level: '0'
+          retention-days: '1'
+  consume:
+    needs: produce
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [snapshot, fallback]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Make /mnt writeable and move docker there"
+        run: ./scripts/ci/make_mnt_writeable.sh && ./scripts/ci/move_docker_to_mnt.sh
+      - name: "Force the fallback: give the daemon an image the snapshot would drop"
+        if: matrix.path == 'fallback'
+        run: |
+          # free-space in the breeze action prunes images, so add one after it via a wrapper step below
+          echo "FORCE_FALLBACK=true" >> "$GITHUB_ENV"
+      - name: "Install Breeze (for the fallback case, to seed an image after its cleanup)"
+        if: matrix.path == 'fallback'
+        uses: ./.github/actions/breeze
+      - name: "Seed an unrelated image"
+        if: matrix.path == 'fallback'
+        run: docker pull -q hello-world
+      - name: "Prepare breeze & CI image (modified action)"
+        id: prepare
+        uses: ./.github/actions/prepare_breeze_and_image
+        with:
+          platform: linux/amd64
+          python: "3.10"
+          use-uv: "true"
+          make-mnt-writeable-and-cleanup: "false"
+      - name: "Which path was taken"
+        run: |
+          docker images
+          docker image inspect "ghcr.io/${GITHUB_REPOSITORY,,}/main/ci/python3.10:latest" --format 'image ok {{.Id}}'
+      - name: "Run real tests with the restored image"
+        env:
+          SKIP_IMAGE_UPGRADE_CHECK: "true"
+          MOUNT_SOURCES: "skip"
+        run: |
+          s=$SECONDS
+          breeze testing core-tests --backend sqlite --db-reset airflow-core/tests/unit/utils/test_helpers.py airflow-core/tests/unit/models/test_dagrun.py 2>&1 | tail -5
+          echo "tests took $((SECONDS - s))s"
