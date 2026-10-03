@@ -171,18 +171,21 @@ def fix_ownership(use_sudo: bool):
     sys.exit(0)
 
 
-def get_changed_files(commit_ref: str | None) -> tuple[str, ...]:
+def get_changed_files(commit_ref: str | None, base_ref: str | None = None) -> tuple[str, ...]:
     if commit_ref is None:
         return ()
-    cmd = [
-        "git",
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "-r",
-        commit_ref + "^",
-        commit_ref,
-    ]
+    if base_ref:
+        cmd = ["git", "diff", "--name-only", f"{base_ref}...{commit_ref}"]
+    else:
+        cmd = [
+            "git",
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            commit_ref + "^",
+            commit_ref,
+        ]
     result = run_command(cmd, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         console_print(f"[warning] Error when running diff-tree command [/]\n{result.stdout}\n{result.stderr}")
@@ -201,6 +204,17 @@ def get_changed_files(commit_ref: str | None) -> tuple[str, ...]:
     "--commit-ref",
     help="Commit-ish reference to the commit that should be checked",
     envvar="COMMIT_REF",
+)
+@click.option(
+    "--base-ref",
+    help="Optional base reference. When set, inspect the merge-base diff from base to commit-ref.",
+)
+@click.option(
+    "--output-format",
+    type=click.Choice(["github", "json"]),
+    default="github",
+    show_default=True,
+    help="Emit the existing GitHub Actions outputs or a structured shadow CI plan.",
 )
 @click.option(
     "--pr-labels",
@@ -266,6 +280,8 @@ def get_changed_files(commit_ref: str | None) -> tuple[str, ...]:
 @option_dry_run
 def selective_check(
     commit_ref: str | None,
+    base_ref: str | None,
+    output_format: str,
     pr_labels: str,
     default_branch: str,
     default_constraints_branch: str,
@@ -287,7 +303,7 @@ def selective_check(
         github_context_dict = json.loads(github_context) if github_context else {}
         github_event = GithubEvents(github_event_name)
         if commit_ref is not None:
-            changed_files = get_changed_files(commit_ref=commit_ref)
+            changed_files = get_changed_files(commit_ref=commit_ref, base_ref=base_ref)
         else:
             changed_files = ()
         sc = SelectiveChecks(
@@ -302,7 +318,23 @@ def selective_check(
             github_context_dict=github_context_dict,
             platform=ci_platform,
         )
-        print(str(sc), file=sys.stderr)
+        if output_format == "json":
+            from airflow_breeze.utils.ci_plan import build_ci_plan
+
+            print(
+                json.dumps(
+                    build_ci_plan(
+                        sc,
+                        changed_files=changed_files,
+                        commit_ref=commit_ref,
+                        base_ref=base_ref,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(str(sc), file=sys.stderr)
     except Exception:
         get_console().print_exception(show_locals=True)
         sys.exit(1)
