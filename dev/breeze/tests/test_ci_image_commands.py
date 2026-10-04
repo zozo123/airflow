@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from unittest import mock
 
 import pytest
@@ -28,12 +30,73 @@ from airflow_breeze.commands.ci_image_commands import (
     get_ci_image_sources_hash_label,
     import_mount_cache,
     is_ci_image_built_from_current_sources,
+    save,
 )
 from airflow_breeze.global_constants import CI_IMAGE_SOURCES_HASH_LABEL
 from airflow_breeze.params.build_ci_params import BuildCiParams
 from airflow_breeze.utils.md5_build_check import calculate_ci_sources_hash
 
 CI_IMAGE = "ghcr.io/apache/airflow/main/ci/python3.10"
+
+
+@pytest.mark.parametrize(
+    ("compress", "failure"), [(True, None), (True, "docker"), (True, "zstd"), (False, None)]
+)
+@mock.patch("airflow_breeze.commands.ci_image_commands.perform_environment_checks", autospec=True)
+@mock.patch("airflow_breeze.commands.ci_image_commands.run_command", autospec=True)
+def test_save_image(mock_run_command, mock_environment_checks, tmp_path, monkeypatch, compress, failure):
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    docker = tools / "docker"
+    docker.write_text(
+        '#!/bin/bash\n[[ "$1" == buildx ]] && exit 0\n'
+        '[[ "$3" == -o ]] && { printf "image stream" > "$4"; exit 0; }\n'
+        'printf "image stream"\n[[ "$FAILURE" == docker ]] && exit 7\nexit 0\n'
+    )
+    zstd = tools / "zstd"
+    zstd.write_text('#!/bin/bash\ncat > "${@: -1}"\n[[ "$FAILURE" == zstd ]] && exit 9\nexit 0\n')
+    docker.chmod(0o755)
+    zstd.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAILURE", failure or "")
+    mock_run_command.side_effect = lambda command, check=False, **kwargs: subprocess.run(
+        command, capture_output=True, text=True, check=check, **kwargs
+    )
+    # Positional shell arguments must preserve spaces and shell metacharacters literally.
+    destination = tmp_path / "image $(false) ' name.tar"
+    kwargs = dict(
+        python="3.10",
+        platform="linux/amd64",
+        github_repository="apache/airflow",
+        image_file=destination,
+        image_file_dir=tmp_path,
+        compress=compress,
+    )
+    if failure:
+        with pytest.raises(SystemExit) as exc:
+            save.callback(**kwargs)
+        assert exc.value.code == (7 if failure == "docker" else 9)
+        assert not destination.exists()
+    else:
+        save.callback(**kwargs)
+        assert destination.read_bytes() == b"image stream"
+
+
+@pytest.mark.parametrize("compress", [False, True])
+@mock.patch("airflow_breeze.commands.ci_image_commands.perform_environment_checks", autospec=True)
+@mock.patch("airflow_breeze.utils.run_utils.get_dry_run", autospec=True, return_value=True)
+def test_save_image_dry_run(mock_dry_run, mock_environment_checks, tmp_path, compress):
+    destination = tmp_path / "existing.tar"
+    destination.write_bytes(b"existing image")
+    save.callback(
+        python="3.10",
+        platform="linux/amd64",
+        github_repository="apache/airflow",
+        image_file=destination,
+        image_file_dir=tmp_path,
+        compress=compress,
+    )
+    assert destination.read_bytes() == b"existing image"
 
 
 def test_calculate_ci_sources_hash_is_stable_across_checkouts(tmp_path, monkeypatch):

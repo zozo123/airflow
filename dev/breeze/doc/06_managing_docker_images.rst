@@ -92,6 +92,11 @@ Loading and saving CI image
 You can load and save PROD image - for example to transfer it to another machine or to load an image
 that has been built in our CI.
 
+Use ``breeze ci-image save --compress`` to stream the image through zstd without
+writing an intermediate uncompressed archive. This requires ``zstd`` on your
+``PATH``. The filename stays the same; Docker detects compression when loading
+the image, so ``breeze ci-image load`` works with either format.
+
 These are all available flags of ``save`` command:
 
 .. image:: ./images/output_ci-image_save.svg

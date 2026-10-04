@@ -516,6 +516,7 @@ def run_verify_in_parallel(
 
 @ci_image_group.command(name="save")
 @option_ci_image_file_to_save
+@click.option("--compress", is_flag=True, help="Stream the saved image through zstd (requires zstd on PATH).")
 @option_github_repository
 @option_image_file_dir
 @option_platform_single
@@ -528,6 +529,7 @@ def save(
     github_repository: str,
     image_file: Path | None,
     image_file_dir: Path,
+    compress: bool,
 ):
     """Save CI image to a file."""
     perform_environment_checks()
@@ -545,10 +547,24 @@ def save(
     else:
         image_file_to_store = image_file_dir / image_file
     console_print(f"[info]Saving Python CI image {image_name} to {image_file_to_store}[/]")
-    result = run_command(
-        ["docker", "image", "save", "-o", image_file_to_store.as_posix(), image_name], check=False
-    )
+    if compress:
+        # Preserve the stash filename: Docker detects compression by content when loading.
+        command = [
+            "bash",
+            "-o",
+            "pipefail",
+            "-c",
+            'docker image save "$1" | zstd -6 -T0 --quiet --force -o "$2"',
+            "--",
+            image_name,
+            image_file_to_store.as_posix(),
+        ]
+    else:
+        command = ["docker", "image", "save", "-o", image_file_to_store.as_posix(), image_name]
+    result = run_command(command, check=False)
     if result.returncode != 0:
+        if compress:
+            image_file_to_store.unlink(missing_ok=True)
         console_print(f"[error]Error when saving image: {result.stdout}[/]")
         sys.exit(result.returncode)
 

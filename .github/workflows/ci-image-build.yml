@@ -328,11 +328,7 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           COMMIT_FILE: "/mnt/ci-image-commit-${{ env.PYTHON_MAJOR_MINOR_VERSION }}.txt"
         run: |
-          breeze ci-image save --platform "${PLATFORM}" --image-file-dir "/mnt"
-          for image_file in /mnt/ci-image-save-*-"${PYTHON_MAJOR_MINOR_VERSION}".tar; do
-            zstd -6 -T0 --rm -o "${image_file}.zst" "${image_file}"
-            mv "${image_file}.zst" "${image_file}"
-          done
+          breeze ci-image save --platform "${PLATFORM}" --image-file-dir "/mnt" --compress
           git rev-parse HEAD > "${COMMIT_FILE}"
         shell: bash
         if: inputs.upload-image-artifact == 'true' && steps.stashed-image.outputs.reusable != 'true'
