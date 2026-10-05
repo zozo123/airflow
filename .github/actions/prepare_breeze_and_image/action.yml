@@ -89,7 +89,7 @@ runs:
         path: "/mnt/"
       id: restore-snapshot
       if: >
-        github.event_name == 'pull_request' &&
+        (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.repository == 'zozo123/airflow')) &&
         inputs.image-type == 'ci' && inputs.image-stash-ref == ''
     # Falls back to the image stash below whenever the snapshot does not fit this runner's daemon.
     - name: "Unpack CI image snapshot ${{ inputs.platform }}:${{ inputs.python }}"
