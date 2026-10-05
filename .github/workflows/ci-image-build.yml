@@ -224,7 +224,7 @@ jobs:
             ${{ inputs.image-stash-ref != '' && format('-{0}', inputs.image-stash-ref) || '' }}"
           path: "/tmp/"
         id: restore-cache-mount
-        if: steps.stashed-image.outputs.reusable != 'true'
+        if: steps.stashed-image.outputs.reusable != 'true' && github.event.inputs.cache_mode == 'warm'
       - name: "Verify ci-cache file exists"
         if: steps.restore-cache-mount.outputs.stash-hit == 'true'
         env:
@@ -274,6 +274,17 @@ jobs:
           steps.stashed-image.outputs.reusable != 'true' && (
           steps.restore-cache-image-for-ref.outputs.stash-hit == 'true' ||
           steps.restore-cache-image.outputs.stash-hit == 'true')
+      - name: Controlled source or lockfile cache probe
+        env:
+          PROBE: ${{ github.event.inputs.probe }}
+          SAMPLE: ${{ github.event.inputs.sample }}
+        shell: bash
+        run: |
+          if [[ "${PROBE}" == source ]]; then
+            printf '\n# Controlled CI cache probe %s.\n' "${SAMPLE}" >> airflow-core/src/airflow/__init__.py
+          elif [[ "${PROBE}" == lock ]]; then
+            printf '\n' >> uv.lock
+          fi
       - name: "Login to ghcr.io"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -453,7 +464,7 @@ jobs:
           daemon_stopped=false
         shell: bash
         if: >
-          github.event_name == 'pull_request' &&
+          (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.repository == 'zozo123/airflow')) &&
           inputs.upload-image-artifact == 'true' && inputs.image-stash-ref == '' &&
           (inputs.checkout-ref == '' || inputs.checkout-ref == github.sha)
       - name: "Upload CI image snapshot ${{ inputs.platform }}:${{ env.PYTHON_MAJOR_MINOR_VERSION }}"
