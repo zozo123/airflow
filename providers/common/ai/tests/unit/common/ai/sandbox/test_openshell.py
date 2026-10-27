@@ -1375,14 +1375,24 @@ class TestRunWrapper:
         assert time.monotonic() - resumed < 3
 
     def test_a_background_child_does_not_hold_the_call(self):
-        started = time.monotonic()
-        result = self._run("sleep 304 & echo started", seconds=30)
+        # The child's exec can lag the fork under a loaded scheduler, so /proc may not
+        # show "sleep 304" yet if the parent exits the instant echo runs. Wait for that
+        # cmdline before exiting; the call returning with the child still alive — not a
+        # wall-clock bound — proves the wrapper did not wait for it (budget 30s; sleep 304).
+        result = self._run(
+            "sleep 304 & c=$!\n"
+            "while true; do\n"
+            "  cmdline=$(tr '\\0' ' ' </proc/$c/cmdline 2>/dev/null) || true\n"
+            '  case $cmdline in *"sleep 304"*) break ;; esac\n'
+            "done\n"
+            "echo started",
+            seconds=30,
+        )
 
         survivors = self._pids("sleep 304")
         for pid in survivors:
             os.kill(pid, signal.SIGKILL)
         assert (result.returncode, result.stdout) == (0, b"started\n")
-        assert time.monotonic() - started < 5
         assert survivors
 
     def test_a_failure_to_stage_the_command_has_its_own_status(self, tmp_path):
